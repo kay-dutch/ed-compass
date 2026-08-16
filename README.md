@@ -1,5 +1,18 @@
 # ED Compass
 
+![Status](https://img.shields.io/badge/STATUS-PRE--RELEASE%20WORK%20IN%20PROGRESS-critical?style=for-the-badge)
+
+> [!CAUTION]
+> ## ⚠️ PRE-RELEASE — WORK IN PROGRESS
+>
+> **THIS IS NOT READY FOR PUBLIC DISTRIBUTION. PLEASE DO NOT SHARE OR
+> REDISTRIBUTE IT YET.**
+>
+> This repository is published for development and testing only. Detector
+> thresholds, file formats and the interface are all still changing, results are
+> not yet dependable, and there are no published releases to install. Anything it
+> reports should be treated as provisional.
+
 **Elite Dangerous hides signals in its audio. This listens for them while you fly.**
 
 There is something in the black that transmits. The
@@ -21,6 +34,11 @@ flying you'd normally use the cockpit overlay instead.</sub>
 ---
 
 ## Install
+
+> [!NOTE]
+> **There is no release to download yet.** The section below describes how
+> installing *will* work once the first build is published. Until then the only
+> way to run it is to [build from source](docs/reference.md#building-from-source).
 
 **[⬇ Download the latest release](../../releases/latest)** — run
 `ED-Compass-Setup.exe` and you're done. No administrator rights, nothing else to
