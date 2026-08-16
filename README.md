@@ -35,13 +35,8 @@ flying you'd normally use the cockpit overlay instead.</sub>
 
 ## Install
 
-> [!NOTE]
-> **There is no release to download yet.** The section below describes how
-> installing *will* work once the first build is published. Until then the only
-> way to run it is to [build from source](docs/reference.md#building-from-source).
-
-**[⬇ Download the latest release](../../releases/latest)** — run
-`ED-Compass-Setup.exe` and you're done. No administrator rights, nothing else to
+**[⬇ Download the latest release](../../releases)** — run
+`ED-Compass-Setup-0.1.0.exe` and you're done. No administrator rights, nothing else to
 install.
 
 Windows will say *"unknown publisher"*. Click **More info → Run anyway**. That

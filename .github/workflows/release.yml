@@ -88,7 +88,15 @@ jobs:
             dist/ed-compass-*-win64.zip
             dist/SHA256SUMS.txt
           generate_release_notes: true
+          # Flagged honestly: the README carries a pre-release warning, and this
+          # build has not yet survived a long unattended session. GitHub keeps
+          # a pre-release out of the repo's headline "Latest release" slot.
+          prerelease: true
           body: |
+            > **Pre-release.** Early build, published for testing. Detector
+            > thresholds and file formats are still changing, and results should
+            > be treated as provisional.
+
             ## Install
 
             Download **ED-Compass-Setup-${{ steps.version.outputs.version }}.exe** and run it.

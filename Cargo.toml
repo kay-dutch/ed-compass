@@ -8,10 +8,7 @@ description = "Passive detector for hidden signals in Elite Dangerous audio"
 authors = ["A Zimin"]
 license = "MIT"
 readme = "README.md"
-# TODO: set this to the real repository before the first release. The release
-# workflow does not depend on it — it uses GitHub's own context — so a wrong
-# value here only shows up in `cargo metadata`.
-repository = "https://github.com/OWNER/ed-compass"
+repository = "https://github.com/tbma2014us/ed-compass"
 keywords = ["elite-dangerous", "spectrogram", "signal", "audio", "overlay"]
 categories = ["multimedia::audio", "games"]
 
