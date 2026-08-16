@@ -11,9 +11,12 @@ spectrogram. Nobody knows how many others there are.
 ED Compass watches for them so you don't have to. Three lamps in your cockpit,
 lit when something is out there.
 
-<!-- Screenshots go in docs/images/ and are linked here.
-     Worth having: the overlay in a cockpit, the control panel, an exported
-     spectrogram with the Landscape Signal visible. -->
+<img src="docs/images/ed-compass.png" alt="The ED Compass analysis window: a live spectrogram of Elite's audio, with the direction compass, periodicity meter and detection log below it" width="820">
+
+<sub>The full view — everything the tool heard in the last few minutes. While
+flying you'd normally use the cockpit overlay instead.</sub>
+
+<!-- More screenshots -->
 
 ---
 
