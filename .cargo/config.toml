@@ -1,0 +1,10 @@
+# Link the MSVC C runtime statically.
+#
+# Without this the executable imports `vcruntime140.dll`, so it refuses to start
+# on any machine that has never had the Visual C++ 2015-2022 Redistributable
+# installed — a failure that looks to the user like a corrupt download. Static
+# linking costs a few hundred kilobytes and removes the dependency, which is the
+# right trade for something distributed as a download to people who did not
+# choose to be developers.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,0 +1,652 @@
+//! ED Compass — spectrogram anomaly detector and audio direction finder for
+//! Elite Dangerous.
+
+// Ship as a GUI application, so launching it from a shortcut does not open a
+// black console window behind the interface. Debug builds keep the console,
+// because that is where the log goes while developing.
+//
+// The cost is that the console-only modes (`--list-devices`, `--headless`)
+// would print into nothing when run from a terminal, so `attach_console` below
+// puts that back.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::path::PathBuf;
+
+use anyhow::{Context, Result, bail};
+use clap::Parser;
+
+use ed_compass::app::{App, Status};
+use ed_compass::audio::capture::{self, CaptureMessage};
+use ed_compass::audio::device::{self, AudioDevice};
+use ed_compass::audio::file_input;
+use ed_compass::audio::format::{MASK_7_1, MASK_STEREO};
+use ed_compass::audio::synthetic::{SyntheticSource, TestSignal};
+use ed_compass::audio::{SampleFormat, StreamFormat};
+use ed_compass::config::Config;
+use ed_compass::single_instance;
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ed-compass",
+    about = "Spectrogram anomaly detector and audio direction finder for Elite Dangerous",
+    version
+)]
+struct Cli {
+    /// Configuration file. Defaults to config.toml beside the executable.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
+    /// Audio endpoint id. Empty selects the default output in loopback mode.
+    #[arg(long, value_name = "ID")]
+    device: Option<String>,
+
+    /// List audio endpoints and exit.
+    #[arg(long)]
+    list_devices: bool,
+
+    /// Where triggered captures are written.
+    #[arg(long, value_name = "DIR")]
+    captures: Option<PathBuf>,
+
+    /// Run without a window, logging detections to the console.
+    #[arg(long)]
+    headless: bool,
+
+    /// Which window to open: full or compact.
+    #[arg(long, value_name = "VIEW", value_parser = ["full", "compact"])]
+    view: Option<String>,
+
+    /// Small control panel. Shorthand for --view compact.
+    #[arg(long, conflicts_with = "view")]
+    compact: bool,
+
+    /// Accepted and ignored. The in-game overlay is no longer a window you
+    /// start into: it appears by itself whenever Elite has focus. Kept so the
+    /// old Desktop shortcut still launches instead of failing to parse.
+    #[arg(long, hide = true)]
+    overlay: bool,
+
+    /// Create a Desktop shortcut, then exit.
+    #[arg(long)]
+    install_shortcut: bool,
+
+    /// Stop after this many seconds. Headless only.
+    #[arg(long, value_name = "SECONDS")]
+    duration: Option<f32>,
+
+    // ---- synthetic test sources ----
+    #[arg(long, help = "Synthesize digital silence")]
+    test_silence: bool,
+    #[arg(long, help = "Synthesize broadband noise")]
+    test_noise: bool,
+    #[arg(long, value_name = "HZ", help = "Synthesize a sine tone")]
+    test_sine: Option<f32>,
+    #[arg(
+        long,
+        num_args = 3,
+        value_names = ["START_HZ", "END_HZ", "SECONDS"],
+        help = "Synthesize a repeating frequency sweep"
+    )]
+    test_sweep: Option<Vec<f32>>,
+    #[arg(
+        long,
+        help = "Synthesize a mountain-shaped spectrogram on the Landscape Signal's 109.5 s cycle"
+    )]
+    test_landscape: bool,
+    #[arg(
+        long,
+        help = "Synthesize a keyed binary transmission (tightbeam-shaped)"
+    )]
+    test_tightbeam: bool,
+    #[arg(long, help = "Synthesize line art drawn into the spectrogram")]
+    test_picture: bool,
+
+    /// Azimuth to pan a synthetic source to, in degrees. 0 is dead ahead.
+    #[arg(
+        long,
+        value_name = "DEG",
+        default_value_t = 0.0,
+        allow_negative_numbers = true
+    )]
+    azimuth: f32,
+
+    /// Channel count for synthetic sources. 8 exercises the 7.1 direction finder.
+    #[arg(long, value_name = "N", default_value_t = 8)]
+    channels: usize,
+
+    /// Sample rate for synthetic sources.
+    #[arg(long, value_name = "HZ", default_value_t = 48_000)]
+    rate: u32,
+
+    // ---- offline input ----
+    /// Analyze a WAV or FLAC file instead of live audio.
+    #[arg(long, value_name = "FILE")]
+    input: Option<PathBuf>,
+
+    /// Replay the input file continuously.
+    #[arg(long = "loop")]
+    loop_input: bool,
+
+    /// Play the input file at wall-clock speed rather than as fast as possible.
+    #[arg(long)]
+    realtime: bool,
+
+    /// Write the spectrogram to this PNG when the run finishes. Headless only.
+    #[arg(long, value_name = "PATH")]
+    export_png: Option<PathBuf>,
+
+    /// More logging. Repeat for more still.
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
+}
+
+impl Cli {
+    /// The synthetic signal requested, if any. Rejects more than one.
+    fn test_signal(&self) -> Result<Option<TestSignal>> {
+        let mut chosen: Vec<TestSignal> = Vec::new();
+        if self.test_silence {
+            chosen.push(TestSignal::Silence);
+        }
+        if self.test_noise {
+            chosen.push(TestSignal::Noise);
+        }
+        if let Some(hz) = self.test_sine {
+            chosen.push(TestSignal::Sine { hz });
+        }
+        if let Some(args) = &self.test_sweep {
+            chosen.push(TestSignal::Sweep {
+                start_hz: args[0],
+                end_hz: args[1],
+                seconds: args[2],
+            });
+        }
+        if self.test_landscape {
+            chosen.push(TestSignal::Landscape);
+        }
+        if self.test_tightbeam {
+            chosen.push(TestSignal::Tightbeam);
+        }
+        if self.test_picture {
+            chosen.push(TestSignal::Picture);
+        }
+        match chosen.len() {
+            0 => Ok(None),
+            1 => Ok(Some(chosen[0])),
+            n => bail!("{n} test signals requested; pick one"),
+        }
+    }
+}
+
+/// Create Desktop shortcuts on Windows.
+///
+/// Driven through PowerShell's `WScript.Shell` rather than hand-rolling the
+/// `IShellLink` COM dance, which is a lot of unsafe code for something run once.
+#[cfg(windows)]
+fn install_shortcuts() -> Result<()> {
+    let exe = std::env::current_exe().context("locating this executable")?;
+    let exe = exe.display().to_string();
+    let dir = std::path::Path::new(&exe)
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+
+    // One shortcut, because there is one window. The overlay comes and goes
+    // with the game rather than being something you launch.
+    let shortcuts = [("ED Compass", "--compact")];
+
+    for (name, args) in shortcuts {
+        let script = format!(
+            "$s = (New-Object -ComObject WScript.Shell).CreateShortcut(\
+             [System.IO.Path]::Combine([Environment]::GetFolderPath('Desktop'), '{name}.lnk')); \
+             $s.TargetPath = '{exe}'; $s.Arguments = '{args}'; \
+             $s.WorkingDirectory = '{dir}'; $s.IconLocation = '{exe},0'; \
+             $s.Description = 'Elite Dangerous signal monitor'; $s.Save()"
+        );
+        let status = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .status()
+            .context("running PowerShell to create the shortcut")?;
+        if !status.success() {
+            bail!("could not create the \"{name}\" shortcut (PowerShell exited {status})");
+        }
+        println!("Created Desktop shortcut: {name}");
+    }
+    println!();
+    println!("The overlay needs Elite Dangerous in BORDERLESS mode — an exclusive");
+    println!("fullscreen game covers every other window, including this one.");
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn install_shortcuts() -> Result<()> {
+    bail!("Desktop shortcuts are a Windows feature")
+}
+
+fn init_logging(verbosity: u8) {
+    let level = match verbosity {
+        0 => "info",
+        1 => "debug",
+        _ => "trace",
+    };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level))
+        .format_timestamp_secs()
+        .init();
+}
+
+fn list_devices() -> Result<()> {
+    let devices = device::enumerate().context("enumerating audio endpoints")?;
+    if devices.is_empty() {
+        println!("No audio endpoints found.");
+        #[cfg(not(windows))]
+        println!("(Endpoint enumeration requires Windows. Use --test-landscape or --input here.)");
+        return Ok(());
+    }
+    println!("{:<40}  ID", "DEVICE");
+    for d in &devices {
+        println!("{:<40}  {}", d.display_name(), d.id);
+    }
+    Ok(())
+}
+
+/// Start whichever source the arguments select, returning the app.
+fn build_app(cli: &Cli, cfg: Config, capture_dir: PathBuf) -> Result<App> {
+    let (tx, rx) = crossbeam_channel::bounded::<CaptureMessage>(256);
+
+    if let Some(path) = &cli.input {
+        let mut source = file_input::load(path)?;
+        source.set_looping(cli.loop_input);
+        let label = format!("file: {}", path.display());
+        let handle = capture::start_file(source, tx, cli.realtime || !cli.headless);
+        return Ok(App::new(cfg, label, handle, rx, capture_dir));
+    }
+
+    if let Some(signal) = cli.test_signal()? {
+        let mask = match cli.channels {
+            2 => MASK_STEREO,
+            8 => MASK_7_1,
+            _ => 0,
+        };
+        let format = StreamFormat::new(cli.rate, cli.channels, mask, SampleFormat::F32);
+        log::info!(
+            "synthetic source: {signal:?} at {:+.0}° across {}",
+            cli.azimuth,
+            format.describe()
+        );
+        let label = format!("synthetic ({})", format.layout_name());
+        let source = SyntheticSource::new(signal, format, cli.azimuth);
+        let handle = capture::start_synthetic(source, tx);
+        return Ok(App::new(cfg, label, handle, rx, capture_dir));
+    }
+
+    // Live capture.
+    let devices = device::enumerate().context("enumerating audio endpoints")?;
+    let requested = cli.device.clone().unwrap_or_else(|| cfg.device.clone());
+    let selected: AudioDevice = device::select(&devices, &requested).cloned().context(
+        "no audio endpoint available — pass --test-landscape or --input to run without one",
+    )?;
+    log::info!("using {}", selected.display_name());
+
+    let handle = capture::start(&selected, tx)?;
+    Ok(App::new(
+        cfg,
+        selected.display_name(),
+        handle,
+        rx,
+        capture_dir,
+    ))
+}
+
+/// Console mode: pump, report detections, exit on duration or end of input.
+fn run_headless(mut app: App, duration: Option<f32>, export_png: Option<PathBuf>) -> Result<()> {
+    // Read the configured thresholds rather than repeating literals here, or the
+    // console disagrees with the UI about what counts as a detection.
+    let keying_threshold = app.config().keying_threshold;
+    let structure_threshold = app.config().structure_threshold;
+    let started = std::time::Instant::now();
+    let mut reported = 0usize;
+    let mut last_status = Status::Starting;
+    let mut last_progress = std::time::Instant::now();
+
+    loop {
+        app.pump();
+
+        if app.status() != last_status {
+            log::info!("status: {}", app.status().label());
+            last_status = app.status();
+        }
+
+        while reported < app.events().len() {
+            let e = &app.events()[reported];
+            let d = &e.detection;
+            let bearing = if d.direction.is_usable() {
+                format!(
+                    "{:+.0}° (confidence {:.2}{})",
+                    d.direction.azimuth_deg,
+                    d.direction.confidence,
+                    if d.direction.front_back_ambiguous {
+                        ", front/back ambiguous"
+                    } else {
+                        ""
+                    }
+                )
+            } else {
+                "no bearing".into()
+            };
+            println!(
+                "{}  {:>7.0}–{:<7.0} Hz  {:>5.1} s  {:>5.1} dB  score {:.2}  {}  {}{}",
+                e.timestamp,
+                d.event.low_hz,
+                d.event.high_hz,
+                d.event.duration_seconds,
+                d.event.peak_excess_db,
+                d.event.score,
+                bearing,
+                e.star_system.as_deref().unwrap_or("unknown system"),
+                match &e.captured_to {
+                    Some(p) => format!("  → {}", p.display()),
+                    None => String::new(),
+                }
+            );
+            reported += 1;
+        }
+
+        if last_progress.elapsed() >= std::time::Duration::from_secs(15) {
+            if let Some(snap) = app.snapshot() {
+                let period = snap
+                    .periodicity
+                    .as_ref()
+                    .map(|p| {
+                        format!(
+                            "period {:.1} s (confidence {:.2})",
+                            p.period_seconds, p.confidence
+                        )
+                    })
+                    .unwrap_or_else(|| "no period yet".into());
+                let keying = match &snap.keying {
+                    Some(k) if k.is_present(keying_threshold) => format!(
+                        "KEYING {:.2} ({} tones, {:.1} sym/s)",
+                        k.confidence,
+                        k.tones_hz.len(),
+                        k.symbol_rate_hz
+                    ),
+                    Some(k) => format!("keying {:.2}", k.confidence),
+                    None => "keying —".into(),
+                };
+                let structure = if snap.structure.is_present(structure_threshold) {
+                    format!("PICTURE {:.2}", snap.structure.score)
+                } else {
+                    format!("picture {:.2}", snap.structure.score)
+                };
+                log::info!(
+                    "{:.0} s · RMS {:.1} dBFS · {keying} · {structure} · {period} · {} gaps",
+                    snap.timeline_seconds,
+                    snap.stats.rms_dbfs,
+                    snap.gap_count
+                );
+            }
+            last_progress = std::time::Instant::now();
+        }
+
+        if app.status() == Status::DeviceLost {
+            if let Some(e) = app.error() {
+                bail!("capture stopped: {e}");
+            }
+            log::info!("input finished");
+            break;
+        }
+        if let Some(limit) = duration
+            && started.elapsed().as_secs_f32() >= limit
+        {
+            log::info!("reached the {limit} s limit");
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    if let Some(path) = export_png
+        && let Some(engine) = app.engine()
+    {
+        let cfg = engine.config().clone();
+        let geometry = engine.geometry();
+        let scale = ed_compass::ui::waterfall::FreqScale::new(
+            cfg.spectrogram_min_hz,
+            cfg.spectrogram_max_hz,
+            geometry.nyquist_hz(),
+        );
+        let history = if cfg.spectrogram_show_excess {
+            engine.excess_waterfall()
+        } else {
+            engine.waterfall()
+        };
+        let window_frames = (cfg.waterfall_seconds / geometry.frame_seconds())
+            .ceil()
+            .max(1.0) as usize;
+        match ed_compass::ui::waterfall::export_png(
+            history,
+            geometry,
+            ed_compass::ui::waterfall::RenderOptions {
+                scale,
+                auto_gain: true,
+                median_subtract: cfg.spectrogram_median_subtract,
+                window_frames,
+            },
+            cfg.export_width,
+            ed_compass::ui::export_height(&cfg),
+            &path,
+        ) {
+            Ok(()) => println!("Exported {}", path.display()),
+            Err(e) => eprintln!("could not export: {e}"),
+        }
+    }
+
+    if let Some(snap) = app.snapshot() {
+        println!();
+        println!("Analyzed {:.1} s of audio.", snap.timeline_seconds);
+        println!("Detections: {}", app.events().len());
+        println!("Captures written: {}", app.captures_written());
+        if snap.gap_count > 0 {
+            println!(
+                "Timeline gaps: {} totalling {:.1} s",
+                snap.gap_count, snap.gap_seconds
+            );
+        }
+        match &snap.keying {
+            Some(k) => println!(
+                "Binary keying: confidence {:.2} — {} tones {:?}, {:.2} symbols/s, \
+                 timing {:.2}, purity {:.2}{}",
+                k.confidence,
+                k.tones_hz.len(),
+                k.tones_hz
+                    .iter()
+                    .map(|h| h.round() as i32)
+                    .collect::<Vec<_>>(),
+                k.symbol_rate_hz,
+                k.timing_regularity,
+                k.alphabet_purity,
+                if k.is_present(keying_threshold) {
+                    "  ← TRANSMISSION PRESENT"
+                } else {
+                    ""
+                }
+            ),
+            None => println!("Binary keying: no symbols observed"),
+        }
+        if let Some(engine) = app.engine() {
+            let (peak, at) = engine.peak_structure();
+            let (kpeak, kat) = engine.peak_keying();
+            println!();
+            println!("Peak over the whole run — this is the one that matters for a recording,");
+            println!("since the live scores describe only the last few seconds:");
+            println!(
+                "  structure {:.3} at {:.0} s (coherence {:.2}, sparsity {:.2}, diagonality {:.2}){}",
+                peak.score,
+                at,
+                peak.coherence,
+                peak.sparsity,
+                peak.diagonality,
+                if peak.is_present(structure_threshold) {
+                    "  ← PICTURE"
+                } else {
+                    ""
+                }
+            );
+            println!(
+                "  keying    {:.3} at {:.0} s{}",
+                kpeak,
+                kat,
+                if kpeak >= keying_threshold {
+                    "  ← TRANSMISSION"
+                } else {
+                    ""
+                }
+            );
+            println!();
+        }
+        println!(
+            "Drawn structure (final): score {:.3} (coherence {:.2}, sparsity {:.2}, diversity {:.2}){}",
+            snap.structure.score,
+            snap.structure.coherence,
+            snap.structure.sparsity,
+            snap.structure.orientation_diversity,
+            if snap.structure.is_present(structure_threshold) {
+                "  ← PICTURE PRESENT"
+            } else {
+                ""
+            }
+        );
+        match &snap.periodicity {
+            Some(p) => {
+                println!(
+                    "Dominant period: {:.2} s (confidence {:.2}, prominence {:.2}){}",
+                    p.period_seconds,
+                    p.confidence,
+                    p.prominence,
+                    if ed_compass::analysis::periodicity::matches_landscape(p, 2.0) {
+                        "  ← consistent with the Landscape Signal"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            None => println!("Dominant period: none found"),
+        }
+    }
+    Ok(())
+}
+
+/// Reattach to the terminal that launched us, if there was one.
+///
+/// A GUI-subsystem process gets no console, and Windows does not connect it to
+/// the parent's. Without this, `ed-compass.exe --list-devices` typed at a prompt
+/// returns instantly and prints nothing at all.
+///
+/// Only *missing* standard handles are filled in. An earlier version replaced
+/// them unconditionally, which broke every case where the shell had already
+/// provided one: `> out.txt` wrote an empty file and piped output vanished,
+/// because the file and pipe handles had been swapped for the console.
+///
+/// Must run before anything writes to stdout: Rust caches the standard handles
+/// the first time they are used.
+#[cfg(all(windows, not(debug_assertions)))]
+fn attach_console() {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_GENERIC_WRITE, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::Console::{
+        ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE,
+        STD_ERROR_HANDLE as ERR, STD_OUTPUT_HANDLE, STD_OUTPUT_HANDLE as OUT, SetStdHandle,
+    };
+    use windows::core::w;
+
+    // SAFETY: plain Win32 calls on values we own. The console handle is checked
+    // before use and deliberately left open for the life of the process.
+    unsafe {
+        let missing = |which| GetStdHandle(which).map_or(true, |h: HANDLE| h.is_invalid());
+        let (no_out, no_err) = (missing(OUT), missing(ERR));
+        if !no_out && !no_err {
+            // Redirected to a file, or piped: output already goes somewhere.
+            return;
+        }
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
+            // Launched from a shortcut or Explorer. There is no parent console,
+            // which is the ordinary case for a GUI application, not an error.
+            return;
+        }
+        let Ok(conout) = CreateFileW(
+            w!("CONOUT$"),
+            FILE_GENERIC_WRITE.0,
+            FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            Default::default(),
+            None,
+        ) else {
+            return;
+        };
+        if no_out {
+            let _ = SetStdHandle(STD_OUTPUT_HANDLE, conout);
+        }
+        if no_err {
+            let _ = SetStdHandle(STD_ERROR_HANDLE, conout);
+        }
+    }
+}
+
+#[cfg(not(all(windows, not(debug_assertions))))]
+fn attach_console() {}
+
+fn main() -> Result<()> {
+    attach_console();
+    let cli = Cli::parse();
+    init_logging(cli.verbose);
+
+    if cli.list_devices {
+        return list_devices();
+    }
+    if cli.install_shortcut {
+        return install_shortcuts();
+    }
+
+    let config_path = cli.config.clone().unwrap_or_else(Config::default_path);
+    let mut cfg = Config::load_or_create(&config_path)?;
+    if let Some(device) = &cli.device {
+        cfg.device = device.clone();
+    }
+    if let Some(view) = &cli.view {
+        cfg.view = view.clone();
+    } else if cli.compact || cli.overlay {
+        cfg.view = "compact".into();
+    }
+    cfg.validate()?;
+    log::info!("configuration: {}", config_path.display());
+
+    let capture_dir = cli.captures.clone().unwrap_or_else(|| {
+        config_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("captures")
+    });
+
+    // Refuse to start a second copy: two instances capture the same audio twice
+    // and enforce the disk budget over the same folder, evicting each other's
+    // recordings. Held until the process exits.
+    let _instance = match single_instance::claim() {
+        Ok(lock) => Some(lock),
+        Err(single_instance::ClaimError::AlreadyRunning) => {
+            bail!("{}", single_instance::ClaimError::AlreadyRunning);
+        }
+        Err(other) => {
+            log::warn!("{other}");
+            None
+        }
+    };
+
+    let app = build_app(&cli, cfg, capture_dir)?;
+
+    if cli.headless {
+        run_headless(app, cli.duration, cli.export_png.clone())
+    } else {
+        ed_compass::ui::run(app)
+    }
+}

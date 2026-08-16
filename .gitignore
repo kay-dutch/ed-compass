@@ -1,0 +1,36 @@
+/target
+/dist
+
+# Build artefacts of the installer.
+/installer/*.exe
+
+# macOS.
+.DS_Store
+
+# ---------------------------------------------------------------------------
+# Research material. None of this belongs in a public repository.
+#
+# Some of it is not ours to redistribute (Canonn's published research, other
+# commanders' recordings), some of it is large enough to bloat every clone, and
+# some of it is simply working notes. Keep it beside the source, out of git.
+# ---------------------------------------------------------------------------
+/other/
+/captures/
+/exports/
+*.pdf
+*.wav
+*.flac
+*.jpg
+*.jpeg
+# PNGs are excluded wholesale rather than by name: spectrogram exports and
+# screenshots land here constantly, and a rule that lists them by name would
+# miss the next one. Anything the project genuinely ships is force-added.
+*.png
+!/installer/*.png
+!/docs/images/*.png
+
+# The internal build spec: written to be built from, not published.
+/sound-compass.md
+
+# Local config written by a test run.
+/config.toml

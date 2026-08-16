@@ -1,0 +1,104 @@
+name: release
+
+# Cutting a release is: bump the version in Cargo.toml, commit, then
+#   git tag v0.1.0 && git push origin v0.1.0
+# Everything below is automatic.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (no leading v). Produces a draft release."
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The tag and Cargo.toml must agree. Forgetting to bump one of them
+      # produces a release whose installer reports a different version from the
+      # tag it was built from, which is impossible to diagnose afterwards.
+      - name: Resolve and check the version
+        id: version
+        shell: pwsh
+        run: |
+          $cargo = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if ('${{ github.event_name }}' -eq 'push') {
+            $tag = '${{ github.ref_name }}' -replace '^v',''
+            if ($tag -ne $cargo) {
+              throw "tag v$tag does not match Cargo.toml version $cargo - bump Cargo.toml or retag"
+            }
+          }
+          "version=$cargo" >> $env:GITHUB_OUTPUT
+          "Building $cargo"
+
+      - name: Test
+        run: cargo test --release --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      # Inno Setup is not guaranteed to be on the runner image, and a release
+      # that fails at the last step because a tool moved is worse than 30
+      # seconds of install time.
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build the installer
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=${{ steps.version.outputs.version }} installer\ed-compass.iss
+
+      - name: Build the portable zip
+        shell: pwsh
+        run: |
+          $stage = "dist\portable"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item target\release\ed-compass.exe, README.md, LICENSE $stage
+          Compress-Archive -Path "$stage\*" -DestinationPath "dist\ed-compass-${{ steps.version.outputs.version }}-win64.zip" -Force
+          Remove-Item -Recurse -Force $stage
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -Include *.exe,*.zip -Recurse |
+            ForEach-Object { "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } |
+            Set-Content dist\SHA256SUMS.txt
+          Get-Content dist\SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ed-compass-windows
+          path: dist/*
+
+      - name: Publish the release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ED-Compass-Setup-*.exe
+            dist/ed-compass-*-win64.zip
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            Download **ED-Compass-Setup-${{ steps.version.outputs.version }}.exe** and run it.
+            No administrator rights are needed; it installs for the current user.
+
+            Windows will warn that the publisher is unknown, because the
+            installer is not code-signed. Choose **More info -> Run anyway**.
+            Verify the download against `SHA256SUMS.txt` if you would rather
+            check than trust.
+
+            Elite Dangerous must run in **borderless** mode for the in-game
+            overlay to be visible. Exclusive fullscreen covers every other
+            window.

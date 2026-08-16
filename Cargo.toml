@@ -1,0 +1,57 @@
+[package]
+name = "ed-compass"
+version = "0.1.0"
+edition = "2024"
+# Let-chains in `if let ... && ...` form; stable since 1.88 on edition 2024.
+rust-version = "1.88"
+description = "Passive detector for hidden signals in Elite Dangerous audio"
+authors = ["A Zimin"]
+license = "MIT"
+readme = "README.md"
+# TODO: set this to the real repository before the first release. The release
+# workflow does not depend on it — it uses GitHub's own context — so a wrong
+# value here only shows up in `cargo metadata`.
+repository = "https://github.com/OWNER/ed-compass"
+keywords = ["elite-dangerous", "spectrogram", "signal", "audio", "overlay"]
+categories = ["multimedia::audio", "games"]
+
+[build-dependencies]
+# Embeds the icon and version information into the .exe, so the taskbar, Alt-Tab
+# and the Details tab of the file's properties show something other than a blank
+# default. Windows-only; skipped silently elsewhere.
+winresource = "0.1.24"
+
+[profile.release]
+# A download, not a dev build: spend the build time once, on the release runner.
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[dependencies]
+anyhow = "1.0.104"
+arc-swap = "1.9.2"
+chrono = "0.4.45"
+clap = { version = "4.6.6", features = ["derive"] }
+claxon = "0.4.3"
+crossbeam-channel = "0.5.16"
+eframe = "0.35.0"
+egui = "0.35.0"
+env_logger = "0.11.11"
+flacenc = "0.5.1"
+hound = "3.5.1"
+log = "0.4.33"
+png = "0.18.1"
+realfft = "3.5.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+toml = "1.1.4"
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62.2", features = ["Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_Foundation", "Win32_Devices_FunctionDiscovery", "Win32_System_Threading", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem", "Win32_System_Performance", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_Storage_FileSystem"] }
+
+[lints.clippy]
+# Tests build a Config from Default and then override the few fields that
+# matter. Spelling out all twenty-odd fields per test would bury the one line
+# that carries the intent.
+field_reassign_with_default = "allow"

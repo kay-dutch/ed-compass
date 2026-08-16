@@ -1,0 +1,13 @@
+//! Spectral analysis, anomaly detection, and direction finding.
+//!
+//! The primary instrument is the STFT. Everything in `statistics` exists to
+//! confirm the capture is healthy, not to find signals.
+
+pub mod direction;
+pub mod keying;
+pub mod novelty;
+pub mod periodicity;
+pub mod spectrogram;
+pub mod statistics;
+pub mod stft;
+pub mod structure;
