@@ -30,7 +30,9 @@ impl IgnoreBand {
 ///    revision 2 while carrying revision-1 geometry: the missing-key default
 ///    used to *be* the current revision, so real pre-revision configs were
 ///    marked migrated without being touched.
-pub const OVERLAY_LAYOUT_REVISION: u32 = 3;
+/// 4: shifted 220 px right — flush in the corner covered Elite's own info
+///    icons. Size unchanged.
+pub const OVERLAY_LAYOUT_REVISION: u32 = 4;
 
 /// Whether files can actually be created in a directory.
 ///
@@ -147,11 +149,15 @@ pub struct Config {
     pub detector_capture_seconds: f32,
 
     // ---- overlay ----
-    /// Overlay centre as a fraction of the game window width. The default 0.375
-    /// is a quarter of the way from the centre toward the left edge.
+    /// Overlay centre as a fraction of the game window width.
     pub overlay_x_fraction: f32,
     /// Overlay top edge as a fraction of the game window height.
     pub overlay_y_fraction: f32,
+    /// Pixels added rightward after the fractional position, so the overlay
+    /// clears Elite's top-left info icons without covering them. Absolute
+    /// rather than fractional because the icons hug the corner at every
+    /// resolution.
+    pub overlay_x_offset_px: f32,
     pub overlay_width: f32,
     /// Height of the lamp strip, before any spectrogram is added.
     pub overlay_height: f32,
@@ -178,9 +184,6 @@ pub struct Config {
     pub overlay_layout_revision: u32,
     /// Draw a spectrogram beside the overlay lamps, at full overlay height.
     pub overlay_spectrogram: bool,
-    /// Share of the overlay width taken by the indicator column on the left.
-    /// The spectrogram fills the rest, at the overlay's full height.
-    pub overlay_label_fraction: f32,
     /// Seconds of history the overlay spectrogram covers.
     ///
     /// Independent of the main window: a cockpit strip wants a short, fast view,
@@ -298,12 +301,10 @@ impl Default for Config {
             // lives there, and it leaves the centre and right panels clear.
             overlay_x_fraction: 0.0,
             overlay_y_fraction: 0.0,
+            overlay_x_offset_px: 220.0,
             overlay_width: 880.0,
             overlay_height: 104.0,
             overlay_spectrogram: true,
-            // At 880 wide the lamp column needs no third of the panel; 0.2
-            // keeps it ~176 px and gives everything else to the spectrogram.
-            overlay_label_fraction: 0.2,
             overlay_spectrogram_seconds: 140.0,
             export_dir: None,
             export_width: 8192,
@@ -418,9 +419,9 @@ impl Config {
         let d = Config::default();
         self.overlay_x_fraction = d.overlay_x_fraction;
         self.overlay_y_fraction = d.overlay_y_fraction;
+        self.overlay_x_offset_px = d.overlay_x_offset_px;
         self.overlay_width = d.overlay_width;
         self.overlay_height = d.overlay_height;
-        self.overlay_label_fraction = d.overlay_label_fraction;
         self.overlay_layout_revision = OVERLAY_LAYOUT_REVISION;
     }
 
@@ -474,13 +475,13 @@ impl Config {
             self.capture_format
         );
         anyhow::ensure!(
-            self.overlay_width >= 80.0 && self.overlay_height >= 30.0,
-            "the overlay must be at least 80x30"
+            self.overlay_x_offset_px.is_finite() && self.overlay_x_offset_px >= 0.0,
+            "overlay_x_offset_px must be a non-negative number, got {}",
+            self.overlay_x_offset_px
         );
         anyhow::ensure!(
-            (0.1..=0.9).contains(&self.overlay_label_fraction),
-            "overlay_label_fraction must be between 0.1 and 0.9, got {}",
-            self.overlay_label_fraction
+            self.overlay_width >= 80.0 && self.overlay_height >= 30.0,
+            "the overlay must be at least 80x30"
         );
         anyhow::ensure!(
             self.overlay_spectrogram_seconds > 0.0,
@@ -512,20 +513,6 @@ impl Config {
     pub fn pcm_ring_bytes(&self, sample_rate: u32, channels: usize) -> usize {
         let frames = (self.pcm_ring_seconds * sample_rate as f32).ceil() as usize;
         frames * channels * std::mem::size_of::<f32>()
-    }
-
-    /// Pixel width of the spectrogram panel inside the overlay.
-    ///
-    /// It occupies everything the indicator column does not, at full height —
-    /// the previous stacked layout left most of the window empty.
-    pub fn overlay_spectrogram_size(&self) -> (f32, f32) {
-        if !self.overlay_spectrogram {
-            return (0.0, 0.0);
-        }
-        (
-            (self.overlay_width * (1.0 - self.overlay_label_fraction)).max(16.0),
-            self.overlay_height.max(16.0),
-        )
     }
 
     /// Export height that reproduces the stroke angles of a different frequency
@@ -646,21 +633,6 @@ mod tests {
     }
 
     #[test]
-    fn the_spectrogram_fills_the_overlay_height_and_the_spare_width() {
-        let mut cfg = Config::default();
-        cfg.overlay_width = 440.0;
-        cfg.overlay_height = 104.0;
-        cfg.overlay_label_fraction = 0.34;
-
-        let (w, h) = cfg.overlay_spectrogram_size();
-        assert!((w - 290.4).abs() < 0.1, "width {w}");
-        assert_eq!(h, 104.0, "it must use the full height, not a strip");
-
-        cfg.overlay_spectrogram = false;
-        assert_eq!(cfg.overlay_spectrogram_size(), (0.0, 0.0));
-    }
-
-    #[test]
     fn writability_is_established_by_trying_it() {
         let dir = std::env::temp_dir();
         assert!(is_writable(&dir), "the temp directory must be writable");
@@ -765,17 +737,6 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.overlay_x_fraction, 0.0);
         assert_eq!(cfg.overlay_y_fraction, 0.0);
-    }
-
-    #[test]
-    fn an_out_of_range_label_fraction_is_rejected() {
-        let mut cfg = Config::default();
-        cfg.overlay_label_fraction = 0.95;
-        assert!(cfg.validate().is_err());
-        cfg.overlay_label_fraction = 0.0;
-        assert!(cfg.validate().is_err());
-        cfg.overlay_label_fraction = 0.34;
-        assert!(cfg.validate().is_ok());
     }
 
     #[test]

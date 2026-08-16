@@ -42,13 +42,19 @@ impl Rect {
 pub struct OverlayAnchor {
     /// Horizontal centre of the overlay as a fraction of the window width.
     ///
-    /// Clamped so the overlay always stays inside the window, which means a
-    /// fraction of 0 pins it flush against the left edge. That is the default:
-    /// the top-left corner is the one large area Elite's own HUD leaves empty,
-    /// so the overlay costs no cockpit visibility there.
+    /// Clamped so the overlay always stays inside the window; a fraction of 0
+    /// pins it against the left edge, from which [`Self::x_offset_px`] then
+    /// nudges it clear of Elite's own icons.
     pub x_fraction: f32,
     /// Top edge as a fraction of the window height.
     pub y_fraction: f32,
+    /// Pixels added rightward after the fractional position is clamped.
+    ///
+    /// Elite draws its info icons and alert messages in the extreme top-left,
+    /// so "flush in the corner" sat on top of them. A pixel offset rather than
+    /// a larger fraction because the icons hug the corner at every resolution —
+    /// the clearance needed is absolute, not proportional.
+    pub x_offset_px: f32,
     pub width: f32,
     pub height: f32,
 }
@@ -58,7 +64,10 @@ impl Default for OverlayAnchor {
         Self {
             x_fraction: 0.0,
             y_fraction: 0.0,
-            width: 440.0,
+            // A quarter of the overlay's own width: enough to clear Elite's
+            // top-left info icons, decided by eye in the cockpit.
+            x_offset_px: 220.0,
+            width: 880.0,
             height: 104.0,
         }
     }
@@ -71,11 +80,15 @@ impl OverlayAnchor {
         let x = centre_x - self.width / 2.0;
         let y = game.top as f32 + game.height() as f32 * self.y_fraction;
 
-        // Never let the overlay slide off the window it belongs to.
+        // Never let the overlay slide off the window it belongs to. The pixel
+        // offset is applied after the first clamp — offsetting the unclamped
+        // value would let a left-anchored overlay swallow its own shift — and
+        // then clamped again so the offset cannot push it off the right edge.
         let max_x = (game.right as f32 - self.width).max(game.left as f32);
         let max_y = (game.bottom as f32 - self.height).max(game.top as f32);
+        let x = x.clamp(game.left as f32, max_x);
         (
-            x.clamp(game.left as f32, max_x),
+            (x + self.x_offset_px).clamp(game.left as f32, max_x),
             y.clamp(game.top as f32, max_y),
         )
     }
@@ -233,19 +246,34 @@ mod tests {
     }
 
     #[test]
-    fn the_default_touches_the_top_left_corner() {
+    fn the_default_clears_the_top_left_icons() {
+        // A quarter of the overlay's own width in from the left edge: right of
+        // Elite's info icons, still far left of centre.
         let a = OverlayAnchor::default();
         let (x, y) = a.position_in(game());
-        assert_eq!((x, y), (0.0, 0.0), "it must sit flush in the corner");
+        assert_eq!((x, y), (220.0, 0.0));
 
-        // And in the corner of the window, not of the desktop.
+        // Measured from the window's corner, not the desktop's.
         let moved = Rect {
             left: 640,
             top: 200,
             right: 2560,
             bottom: 1280,
         };
-        assert_eq!(a.position_in(moved), (640.0, 200.0));
+        assert_eq!(a.position_in(moved), (860.0, 200.0));
+    }
+
+    #[test]
+    fn the_offset_cannot_push_the_overlay_off_the_right_edge() {
+        let a = OverlayAnchor {
+            x_offset_px: 10_000.0,
+            ..Default::default()
+        };
+        let (x, _) = a.position_in(game());
+        assert!(
+            (x - (1920.0 - a.width)).abs() < 0.01,
+            "clamped to the right edge, got {x}"
+        );
     }
 
     #[test]
@@ -267,6 +295,7 @@ mod tests {
     fn placement_scales_with_resolution() {
         let a = OverlayAnchor {
             x_fraction: 0.375,
+            x_offset_px: 0.0,
             ..Default::default()
         };
         let small = Rect {
@@ -310,6 +339,7 @@ mod tests {
         let right = OverlayAnchor {
             x_fraction: 0.75,
             y_fraction: 0.5,
+            x_offset_px: 0.0,
             ..Default::default()
         };
         let (x, y) = right.position_in(game());

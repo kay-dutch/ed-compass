@@ -60,7 +60,7 @@ Three indicators, in the order you should trust them:
 
 | | |
 |---|---|
-| **LANDSCAPE** | The Landscape Signal itself — its 109.5-second cycle, measured. This one is checked against a known recording, so it means what it says. |
+| **SIGNAL** | A repeating transmission, identified by its measured period. A recognised one is named — the Landscape Signal's 109.5 s cycle is checked against a known recording, so a match means what it says. |
 | **TRANSMIT** | Something is keying tones on and off, the way a transmission does. |
 | **STRUCTURE** | The spectrogram has thin diagonal strokes in it — something *drawn* rather than noise. |
 
@@ -69,7 +69,7 @@ fires, the audio is saved automatically, tagged with the star system and
 coordinates you were at.
 
 **TRANSMIT and STRUCTURE also light on ordinary ship ambience.** They are hints,
-not verdicts. LANDSCAPE is the one that has been checked.
+not verdicts. SIGNAL is the one that has been checked.
 
 ## Is this allowed?
 

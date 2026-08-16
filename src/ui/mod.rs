@@ -10,6 +10,7 @@ pub mod events;
 pub mod overlay;
 pub mod waterfall;
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -71,6 +72,26 @@ pub fn export_height(cfg: &crate::config::Config) -> usize {
 /// The overlay's viewport id. Fixed, so reopening it reuses the same window
 /// rather than leaving a trail of dead ones — and derived from a hash, because
 /// `ViewportId(Id::NULL)` is `ViewportId::ROOT`, the control window itself.
+/// Pixel size of the overlay's spectrogram, once the lamps and the bearing
+/// rose have taken what they need.
+///
+/// Lives here rather than on [`Config`] because the lamp column is measured
+/// from the fonts, and fonts are a UI concern.
+fn overlay_spectrogram_size(cfg: &crate::config::Config, label_px: f32) -> (f32, f32) {
+    if !cfg.overlay_spectrogram {
+        return (0.0, 0.0);
+    }
+    let rose = if cfg.direction_finding {
+        cfg.overlay_height
+    } else {
+        0.0
+    };
+    (
+        (cfg.overlay_width - label_px - rose).max(16.0),
+        cfg.overlay_height.max(16.0),
+    )
+}
+
 /// Whether the overlay window should be visible this frame.
 ///
 /// No game window, no overlay — there is nothing to annotate, and a strip
@@ -90,6 +111,7 @@ fn anchor_from(cfg: &crate::config::Config) -> OverlayAnchor {
     OverlayAnchor {
         x_fraction: cfg.overlay_x_fraction,
         y_fraction: cfg.overlay_y_fraction,
+        x_offset_px: cfg.overlay_x_offset_px,
         width: cfg.overlay_width,
         height: cfg.overlay_height,
     }
@@ -107,8 +129,18 @@ struct CompassUi {
     placement: OverlayPlacement,
     /// The overlay's own spectrogram texture, kept separate from the full view's
     /// so switching views does not force a rebuild of either.
-    overlay_texture: Option<egui::TextureHandle>,
+    /// The overlay's own texture, created and updated only inside the overlay
+    /// viewport's pass. See [`overlay::OverlayState::spectrogram`] for why it
+    /// cannot live in the main window's.
+    overlay_texture: Arc<Mutex<Option<egui::TextureHandle>>>,
+    /// What the overlay draws, shared with its viewport callback. The callback
+    /// outlives any one frame, so the state it reads must too.
+    overlay_state: Arc<Mutex<overlay::OverlayState>>,
     last_overlay_render: Instant,
+    /// The newest spectrogram pixels, waiting to be handed to the overlay.
+    pending_spectrogram: Option<egui::ColorImage>,
+    /// Width the lamp column needs, measured from the text it draws.
+    overlay_label_px: f32,
     game_found: bool,
     last_game_poll: Instant,
 
@@ -129,8 +161,11 @@ impl CompassUi {
         Self {
             anchor,
             placement: overlay_placement(anchor),
-            overlay_texture: None,
+            overlay_texture: Arc::new(Mutex::new(None)),
+            overlay_state: Arc::new(Mutex::new(overlay::OverlayState::default())),
             last_overlay_render: Instant::now() - Duration::from_secs(1),
+            pending_spectrogram: None,
+            overlay_label_px: 120.0,
             game_found: false,
             last_game_poll: Instant::now() - Duration::from_secs(10),
             snapshot_interval: interval,
@@ -326,11 +361,24 @@ impl CompassUi {
                 target[0],
                 target[1],
             );
-            self.waterfall_texture = Some(ui.ctx().load_texture(
-                "waterfall",
-                image,
-                egui::TextureOptions::NEAREST,
-            ));
+            // Update in place. Assigning a fresh `load_texture` here dropped
+            // the old handle, which queues a *free* into egui's global texture
+            // delta — about eight per second at the snapshot rate. Two
+            // viewports drain that one queue on independent schedules, so a
+            // free could be applied by one painter while the other still had
+            // the id in its draw list: "Texture with 'egui_texid_Managed(7833)'
+            // label is invalid", and the process died. `set` keeps one id for
+            // the life of the process and queues no frees at all.
+            match &mut self.waterfall_texture {
+                Some(handle) => handle.set(image, egui::TextureOptions::NEAREST),
+                None => {
+                    self.waterfall_texture = Some(ui.ctx().load_texture(
+                        "waterfall",
+                        image,
+                        egui::TextureOptions::NEAREST,
+                    ));
+                }
+            }
             self.waterfall_size = target;
             self.last_waterfall = Instant::now();
         }
@@ -472,17 +520,24 @@ impl CompassUi {
     /// hide mechanism.
     /// Keep the in-game overlay in step with the game window.
     ///
-    /// Modelled on how SrvSurvey manages its plotters, because that model has
-    /// survived years of real use: **one persistent window**, shown and hidden
-    /// — never created and destroyed — and marked non-activating so it cannot
-    /// take focus.
+    /// Modelled on SrvSurvey, which shows its plotters when
+    /// `focusElite || focusSrvSurvey` and tracks the game window explicitly.
     ///
-    /// The first version of this method skipped `show_viewport_deferred`
-    /// whenever the overlay should be hidden, which egui treats as "destroy the
-    /// window". Creating the replacement stole focus from the very window whose
-    /// focus was the test for showing it, so the overlay destroyed and rebuilt
-    /// itself several times a second — visible as flashing, and tearing down a
-    /// wgpu surface at that rate is the likely cause of the crash it ended in.
+    /// Two hard-won constraints, both from bugs:
+    ///
+    /// **The window exists only while it should be seen.** An attempt to keep
+    /// one window alive and toggle `ViewportBuilder::with_visible` froze it: a
+    /// hidden window receives no redraw events, so once hidden the child never
+    /// rendered again, and the `Visible(true)` command that reveals it does not
+    /// restart its render loop. The overlay came back showing whatever frame it
+    /// had when it was hidden — a dead histogram, and no bearing rose at all
+    /// when it had been hidden before the first analysis snapshot arrived.
+    ///
+    /// **Creation must not take focus.** The original flashing was a feedback
+    /// loop: creating the window stole focus from Elite, which made the overlay
+    /// not-wanted, which destroyed it, which returned focus. `with_active(false)`
+    /// breaks that loop, and requiring the game window to exist at all stops the
+    /// overlay appearing over the bare desktop.
     fn sync_overlay(&mut self, ctx: &egui::Context) {
         // Only ask the window manager occasionally for the rectangle — the
         // player is not moving the game window every frame — but a quarter of a
@@ -494,23 +549,46 @@ impl CompassUi {
         let placement = self.placement;
         self.game_found = placement.game_found;
 
-        // Disabled means the window itself goes; that is the one deliberate
-        // destroy, and it is a user action, not a focus flicker.
-        if !self.app.overlay_enabled() {
+        let own_focus = ctx.input(|i| i.focused);
+        if !self.app.overlay_enabled()
+            || !overlay_visible(placement.game_found, placement.game_focused, own_focus)
+        {
+            // Not calling `show_viewport_deferred` closes the window. That is
+            // the whole hide mechanism, and the only one that works.
             return;
         }
 
-        let own_focus = ctx.input(|i| i.focused);
-        let visible = overlay_visible(placement.game_found, placement.game_focused, own_focus);
-
-        if visible {
-            self.rebuild_overlay_spectrogram(ctx);
+        // Measure the column before the image is sized: the spectrogram gets
+        // whatever the lamps do not need.
+        {
+            let probe = overlay::OverlayState::from_app(&self.app);
+            self.overlay_label_px = overlay::label_column_width(ctx, &probe);
         }
-        let mut state = overlay::OverlayState::from_app(&self.app);
-        state.spectrogram = self
-            .overlay_texture
-            .clone()
-            .filter(|_| self.app.config().overlay_spectrogram);
+        self.rebuild_overlay_spectrogram(ctx);
+
+        // Published through a shared cell rather than captured by value. egui
+        // may render the child while the parent sleeps, and its docs call for
+        // exactly this; a closure capturing a snapshot can only ever show the
+        // state of the frame that built it.
+        {
+            let mut shared = self.overlay_state.lock().unwrap();
+            let pixels = shared.spectrogram.take();
+            *shared = overlay::OverlayState::from_app(&self.app);
+            // Carry forward any frame the overlay has not consumed yet, so a
+            // slow child never loses the newest image it was handed.
+            shared.spectrogram = self
+                .pending_spectrogram
+                .take()
+                .or(pixels)
+                .filter(|_| self.app.config().overlay_spectrogram);
+            // Only while direction finding runs: absent, the rose is not drawn
+            // and the spectrogram takes its width back.
+            shared.direction = self
+                .snapshot
+                .as_ref()
+                .map(|s| s.direction)
+                .filter(|_| self.app.config().direction_finding);
+        }
 
         let builder = egui::ViewportBuilder::default()
             .with_title("ED Compass overlay")
@@ -520,36 +598,56 @@ impl CompassUi {
             .with_transparent(true)
             // Click-through, so it can never steal a click meant for the cockpit.
             .with_mouse_passthrough(true)
-            // Never take focus — not even on creation. The game keeps keyboard
-            // and mouse; we are paint, not a window anyone interacts with.
+            // Never take focus, not even on creation — this is what stops the
+            // create/steal-focus/destroy loop that showed up as flashing.
             .with_active(false)
-            // Hidden rather than absent when the game loses focus. egui diffs
-            // the builder and toggles visibility on the existing window.
-            .with_visible(visible)
             // No taskbar entry and no Alt-Tab stop: it is not a window you are
             // ever meant to interact with, and it cannot be lost behind
             // anything because the control window owns the process.
             .with_taskbar(false)
             .with_always_on_top();
 
+        let state = Arc::clone(&self.overlay_state);
+        let texture = Arc::clone(&self.overlay_texture);
         ctx.show_viewport_deferred(overlay_viewport_id(), builder, move |ctx, _class| {
-            if !visible {
-                // Nothing to draw and nothing changing; idle until re-shown.
-                ctx.request_repaint_after(Duration::from_millis(500));
-                return;
-            }
+            // Take the newest pixels and upload them here, in the overlay's own
+            // pass, so this texture is allocated, written and drawn by exactly
+            // one viewport.
+            let snapshot = {
+                let mut shared = state.lock().unwrap();
+                let pixels = shared.spectrogram.take();
+                let snapshot = shared.clone();
+                drop(shared);
+                if let Some(image) = pixels {
+                    let mut texture = texture.lock().unwrap();
+                    match &mut *texture {
+                        Some(handle) => handle.set(image, egui::TextureOptions::NEAREST),
+                        None => {
+                            *texture = Some(ctx.load_texture(
+                                "overlay-spectrogram",
+                                image,
+                                egui::TextureOptions::NEAREST,
+                            ));
+                        }
+                    }
+                }
+                snapshot
+            };
+            let texture = texture.lock().unwrap().clone();
+
             // No frame and no background: whatever is not painted stays
             // transparent and the cockpit shows through.
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(ctx, |ui| overlay::overlay(ui, &state));
+                .show(ctx, |ui| overlay::overlay(ui, &snapshot, texture.as_ref()));
+            // Audio keeps arriving whether or not anything moves on screen.
             ctx.request_repaint_after(Duration::from_millis(66));
         });
     }
 
     /// Rebuild the overlay's own spectrogram texture, at most as often as the
     /// analysis produces new rows.
-    fn rebuild_overlay_spectrogram(&mut self, ctx: &egui::Context) {
+    fn rebuild_overlay_spectrogram(&mut self, _ctx: &egui::Context) {
         let cfg = self.app.config();
         if !cfg.overlay_spectrogram || self.last_overlay_render.elapsed() < self.snapshot_interval {
             return;
@@ -569,7 +667,7 @@ impl CompassUi {
         } else {
             engine.waterfall()
         };
-        let (w, h) = cfg.overlay_spectrogram_size();
+        let (w, h) = overlay_spectrogram_size(cfg, self.overlay_label_px);
         // Its own time window: a cockpit strip wants a short view, not the whole
         // analysis window crushed into a few hundred pixels.
         let window_frames = (cfg.overlay_spectrogram_seconds / geometry.frame_seconds())
@@ -587,8 +685,9 @@ impl CompassUi {
             w as usize,
             h as usize,
         );
-        self.overlay_texture =
-            Some(ctx.load_texture("overlay-spectrogram", image, egui::TextureOptions::NEAREST));
+        // Handed over as pixels. The overlay viewport turns them into a texture
+        // in its own pass; nothing here ever touches the GPU.
+        self.pending_spectrogram = Some(image);
         self.last_overlay_render = Instant::now();
     }
 
@@ -812,14 +911,19 @@ impl eframe::App for CompassUi {
             self.snapshot = self.app.snapshot();
             self.last_snapshot = Instant::now();
         }
+        // The overlay is driven from here, NOT from `ui`, for the same reason
+        // `pump` is: `ui` stops running the moment the main window is
+        // minimized — which is exactly how the tool is used while flying — and
+        // an overlay fed from `ui` freezes at whatever state it was last
+        // handed. The game's focus comes from our own Win32 poll rather than
+        // from egui input, so visibility stays correct even then.
+        self.sync_overlay(ctx);
         // Audio keeps arriving whether or not anything moves on screen, so the
         // window must repaint without waiting for input.
         ctx.request_repaint_after(Duration::from_millis(33));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.sync_overlay(&ui.ctx().clone());
-
         egui::Panel::top("header").show(ui, |ui| {
             ui.add_space(4.0);
             self.header(ui);
@@ -886,6 +990,37 @@ mod tests {
         for own in [false, true] {
             assert!(!overlay_visible(false, false, own), "own_focus={own}");
         }
+    }
+
+    #[test]
+    fn visibility_is_stable_while_the_game_stays_focused() {
+        // The window is created and destroyed by this decision, so any flapping
+        // here is flashing on screen. Focus held steady must give a steady
+        // answer, whatever else changes around it.
+        for _ in 0..10 {
+            assert!(overlay_visible(true, true, false));
+        }
+        // And the answer depends on nothing but its three inputs.
+        assert_eq!(
+            overlay_visible(true, true, false),
+            overlay_visible(true, true, false)
+        );
+    }
+
+    #[test]
+    fn the_overlay_state_is_shareable_with_a_viewport_callback() {
+        // `show_viewport_deferred` demands `Fn + Send + Sync + 'static`, and
+        // the state must be readable from it long after the frame that wrote
+        // it. If this stops compiling, the overlay is about to go stale again.
+        fn assert_shareable<T: Send + Sync + 'static>() {}
+        assert_shareable::<Arc<Mutex<overlay::OverlayState>>>();
+
+        let shared = Arc::new(Mutex::new(overlay::OverlayState::default()));
+        let reader = Arc::clone(&shared);
+        shared.lock().unwrap().landscape = true;
+        // A later write is visible to the holder of the clone — which is the
+        // whole reason the callback reads through one.
+        assert!(reader.lock().unwrap().landscape);
     }
 
     #[test]
