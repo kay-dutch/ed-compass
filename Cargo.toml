@@ -25,7 +25,11 @@ winresource = "0.1.24"
 # A download, not a dev build: spend the build time once, on the release runner.
 lto = "thin"
 codegen-units = 1
-strip = true
+# Keep the symbol table, drop only the DWARF debug info. `strip = true` also
+# removed symbols, which made the crash log's backtraces bare addresses —
+# useless in the very bug reports the crash log exists to make possible.
+# Costs ~1 MB of binary.
+strip = "debuginfo"
 
 [dependencies]
 anyhow = "1.0.104"

@@ -52,17 +52,14 @@ struct Cli {
     #[arg(long)]
     headless: bool,
 
-    /// Which window to open: full or compact.
-    #[arg(long, value_name = "VIEW", value_parser = ["full", "compact"])]
+    /// Accepted and ignored. There is one window now — these flags picked
+    /// between shapes that no longer exist, and are kept only so Desktop
+    /// shortcuts from earlier versions still launch instead of failing to
+    /// parse.
+    #[arg(long, hide = true)]
     view: Option<String>,
-
-    /// Small control panel. Shorthand for --view compact.
-    #[arg(long, conflicts_with = "view")]
+    #[arg(long, hide = true)]
     compact: bool,
-
-    /// Accepted and ignored. The in-game overlay is no longer a window you
-    /// start into: it appears by itself whenever Elite has focus. Kept so the
-    /// old Desktop shortcut still launches instead of failing to parse.
     #[arg(long, hide = true)]
     overlay: bool,
 
@@ -192,7 +189,7 @@ fn install_shortcuts() -> Result<()> {
 
     // One shortcut, because there is one window. The overlay comes and goes
     // with the game rather than being something you launch.
-    let shortcuts = [("ED Compass", "--compact")];
+    let shortcuts = [("ED Compass", "")];
 
     for (name, args) in shortcuts {
         let script = format!(
@@ -596,8 +593,32 @@ fn attach_console() {
 #[cfg(not(all(windows, not(debug_assertions))))]
 fn attach_console() {}
 
+/// Write panics to a file before dying.
+///
+/// A release build is a GUI-subsystem process: no console, so a panic's message
+/// and backtrace go nowhere and the program "just closes itself" — which is
+/// indistinguishable, from the outside, from every other way of dying. The
+/// crash file turns that into something a bug report can contain.
+fn install_crash_log() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let stamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+        let path = Config::default_path().with_file_name(format!("crash-{stamp}.log"));
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let report = format!(
+            "ED Compass {} crashed at {stamp}\nthread: {}\n\n{info}\n\n{backtrace}\n",
+            env!("CARGO_PKG_VERSION"),
+            std::thread::current().name().unwrap_or("unnamed"),
+        );
+        let _ = std::fs::write(&path, &report);
+        log::error!("panic written to {}", path.display());
+        previous(info);
+    }));
+}
+
 fn main() -> Result<()> {
     attach_console();
+    install_crash_log();
     let cli = Cli::parse();
     init_logging(cli.verbose);
 
@@ -613,11 +634,8 @@ fn main() -> Result<()> {
     if let Some(device) = &cli.device {
         cfg.device = device.clone();
     }
-    if let Some(view) = &cli.view {
-        cfg.view = view.clone();
-    } else if cli.compact || cli.overlay {
-        cfg.view = "compact".into();
-    }
+    // --view/--compact/--overlay are accepted for old shortcuts and ignored.
+    let _ = (&cli.view, cli.compact, cli.overlay);
     cfg.validate()?;
     log::info!("configuration: {}", config_path.display());
 
@@ -644,9 +662,24 @@ fn main() -> Result<()> {
 
     let app = build_app(&cli, cfg, capture_dir)?;
 
-    if cli.headless {
+    let result = if cli.headless {
         run_headless(app, cli.duration, cli.export_png.clone())
     } else {
         ed_compass::ui::run(app)
+    };
+
+    // An Err exit in a windowed build vanishes as silently as a panic — stderr
+    // goes nowhere — so give it the same crash file the panic hook writes.
+    if let Err(e) = &result {
+        let stamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+        let path = Config::default_path().with_file_name(format!("crash-{stamp}.log"));
+        let _ = std::fs::write(
+            &path,
+            format!(
+                "ED Compass {} exited with an error at {stamp}\n\n{e:#}\n",
+                env!("CARGO_PKG_VERSION")
+            ),
+        );
     }
+    result
 }

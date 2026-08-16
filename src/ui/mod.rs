@@ -4,10 +4,10 @@
 //! capture path. Snapshots are taken at `analysis_update_hz`, independently of
 //! the frame rate, so redrawing faster costs nothing but pixels.
 
-pub mod compact;
 pub mod compass;
 pub mod controls;
 pub mod events;
+pub mod overlay;
 pub mod waterfall;
 
 use std::time::{Duration, Instant};
@@ -19,21 +19,16 @@ use crate::app::{App, Status};
 use crate::audio::device::{self, AudioDevice};
 use crate::game_window::{OverlayAnchor, OverlayPlacement, overlay_placement};
 use crate::pipeline::AnalysisSnapshot;
-use crate::ui::compact::View;
 
 /// Launch the window. Blocks until it closes.
 pub fn run(app: App) -> Result<()> {
-    let view = View::parse(&app.config().view);
-
-    // Only ever the control window. The overlay is a second viewport that opens
-    // and closes on its own, so this one is always here to come back to.
-    let viewport = egui::ViewportBuilder::default().with_title("ED Compass");
-    let viewport = match view {
-        View::Full => viewport
-            .with_inner_size([1180.0, 860.0])
-            .with_min_inner_size([900.0, 620.0]),
-        View::Compact => viewport.with_inner_size([320.0, 330.0]),
-    };
+    // One window. The in-game overlay is a second viewport that shows and
+    // hides itself with the game; there is no other shape to switch to, which
+    // means there is no state you have to kill the process to leave.
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("ED Compass")
+        .with_inner_size([1180.0, 860.0])
+        .with_min_inner_size([900.0, 620.0]);
 
     let options = eframe::NativeOptions {
         viewport,
@@ -45,7 +40,7 @@ pub fn run(app: App) -> Result<()> {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(CompassUi::new(app, view)))
+            Ok(Box::new(CompassUi::new(app)))
         }),
     )
     .map_err(|e| anyhow::anyhow!("could not open the window: {e}"))
@@ -76,14 +71,15 @@ pub fn export_height(cfg: &crate::config::Config) -> usize {
 /// The overlay's viewport id. Fixed, so reopening it reuses the same window
 /// rather than leaving a trail of dead ones — and derived from a hash, because
 /// `ViewportId(Id::NULL)` is `ViewportId::ROOT`, the control window itself.
-/// Whether the overlay belongs on screen this frame.
+/// Whether the overlay window should be visible this frame.
 ///
-/// It follows the game's focus, so Alt-Tabbing out of Elite takes it away
-/// instead of leaving a strip floating over the browser. It also shows while
-/// *our* window has focus, so the toggles beside it can be seen to do something
-/// rather than being adjusted blind.
-fn overlay_should_show(enabled: bool, game_focused: bool, own_focus: bool) -> bool {
-    enabled && (game_focused || own_focus)
+/// No game window, no overlay — there is nothing to annotate, and a strip
+/// floating over the desktop taught us it just flashes and worries people. With
+/// the game present it follows focus: Elite's, or our own control window's so
+/// the toggles beside it can be seen to do something rather than adjusted
+/// blind.
+fn overlay_visible(game_found: bool, game_focused: bool, own_focus: bool) -> bool {
+    game_found && (game_focused || own_focus)
 }
 
 fn overlay_viewport_id() -> egui::ViewportId {
@@ -105,7 +101,6 @@ struct CompassUi {
     last_snapshot: Instant,
     snapshot_interval: Duration,
 
-    view: View,
     anchor: OverlayAnchor,
     /// Last answer from the window manager about where the game is and whether
     /// it has focus.
@@ -128,11 +123,10 @@ struct CompassUi {
 }
 
 impl CompassUi {
-    fn new(app: App, view: View) -> Self {
+    fn new(app: App) -> Self {
         let interval = Duration::from_secs_f32(1.0 / app.config().analysis_update_hz.max(1.0));
         let anchor = anchor_from(app.config());
         Self {
-            view,
             anchor,
             placement: overlay_placement(anchor),
             overlay_texture: None,
@@ -198,14 +192,6 @@ impl CompassUi {
             }
             if ui.button("↻").on_hover_text("Re-scan endpoints").clicked() {
                 self.devices = device::enumerate().unwrap_or_default();
-            }
-            if ui
-                .button("compact")
-                .on_hover_text("Small always-on-top panel")
-                .clicked()
-            {
-                let ctx = ui.ctx().clone();
-                self.switch_to(&ctx, View::Compact);
             }
             let mut excess = self.app.config().spectrogram_show_excess;
             if ui
@@ -400,27 +386,80 @@ impl CompassUi {
 
     /// The two primary readouts: is something transmitting, and is something
     /// drawn. These lead because they are what the tool is for.
-    /// Move to a different window shape, resizing and restyling to match.
-    fn switch_to(&mut self, ctx: &egui::Context, view: View) {
-        if self.view == view {
-            return;
-        }
-        log::info!("switching to the {} view", view.as_str());
-        self.view = view;
-
-        use egui::ViewportCommand as Cmd;
-        ctx.send_viewport_cmd(Cmd::InnerSize(match view {
-            View::Full => egui::vec2(1180.0, 860.0),
-            View::Compact => egui::vec2(320.0, 330.0),
-        }));
-    }
-
-    fn draw_compact(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(view) = compact::panel(ui, &mut self.app) {
-                self.switch_to(&ctx, view);
+    /// The arming controls, inherited from the retired compact panel.
+    ///
+    /// Each is read back from the app so the widget can never drift out of step
+    /// with what is actually running.
+    fn controls_row(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            // Bound to "listening", which is the inverse of paused — binding
+            // the checkbox straight to `paused` would have made ticking it
+            // stop analysis.
+            let mut listening = !self.app.is_paused();
+            if ui
+                .checkbox(&mut listening, "Listening")
+                .on_hover_text("Unchecked suspends analysis. The audio device stays open.")
+                .changed()
+            {
+                self.app.set_paused(!listening);
             }
+
+            let mut keying = self.app.detect_keying();
+            let mut structure = self.app.detect_structure();
+            let a = ui.checkbox(&mut keying, "Detect transmissions").changed();
+            let b = ui.checkbox(&mut structure, "Detect pictures").changed();
+            if a || b {
+                self.app.set_detectors(keying, structure);
+            }
+
+            let mut overlay_on = self.app.overlay_enabled();
+            if ui
+                .checkbox(&mut overlay_on, "In-game overlay")
+                .on_hover_text(
+                    "Shows the indicators over the cockpit whenever Elite has \
+                     focus, and hides them again when it does not. This window \
+                     stays open either way.",
+                )
+                .changed()
+            {
+                self.app.set_overlay_enabled(overlay_on);
+            }
+            if overlay_on && !self.game_found {
+                // The overlay only exists over the game, so say why it is
+                // absent here, where someone puzzled by that will look.
+                ui.label(
+                    egui::RichText::new("waiting for the Elite Dangerous window")
+                        .monospace()
+                        .size(10.0)
+                        .color(overlay::hud::AMBER),
+                );
+            }
+
+            let mut df = self.app.direction_finding();
+            if ui
+                .checkbox(&mut df, "Direction finding")
+                .on_hover_text(
+                    "Secondary. Costs one transform per channel instead of one, \
+                     and keeps every channel in memory. Switching it rebuilds \
+                     the analysis engine and loses history.",
+                )
+                .changed()
+            {
+                self.app.set_direction_finding(df);
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("Keep last 60 s")
+                    .on_hover_text("Write the recent audio to the captures folder right now.")
+                    .clicked()
+                {
+                    match self.app.keep_recent(60.0, "manual") {
+                        Ok(path) => log::info!("kept {}", path.display()),
+                        Err(e) => log::warn!("could not keep audio: {e:#}"),
+                    }
+                }
+            });
         });
     }
 
@@ -431,11 +470,23 @@ impl CompassUi {
     /// there when the game is not in front of you. Not calling
     /// `show_viewport_deferred` in a frame closes the window, which is the whole
     /// hide mechanism.
+    /// Keep the in-game overlay in step with the game window.
+    ///
+    /// Modelled on how SrvSurvey manages its plotters, because that model has
+    /// survived years of real use: **one persistent window**, shown and hidden
+    /// — never created and destroyed — and marked non-activating so it cannot
+    /// take focus.
+    ///
+    /// The first version of this method skipped `show_viewport_deferred`
+    /// whenever the overlay should be hidden, which egui treats as "destroy the
+    /// window". Creating the replacement stole focus from the very window whose
+    /// focus was the test for showing it, so the overlay destroyed and rebuilt
+    /// itself several times a second — visible as flashing, and tearing down a
+    /// wgpu surface at that rate is the likely cause of the crash it ended in.
     fn sync_overlay(&mut self, ctx: &egui::Context) {
         // Only ask the window manager occasionally for the rectangle — the
-        // player is not moving the game window every frame — but ask about focus
-        // every time, because that is what the overlay's visibility hangs on and
-        // a second of lag on an Alt-Tab is very visible.
+        // player is not moving the game window every frame — but a quarter of a
+        // second is fast enough that an Alt-Tab feels immediate.
         if self.last_game_poll.elapsed() >= Duration::from_millis(250) {
             self.last_game_poll = Instant::now();
             self.placement = overlay_placement(self.anchor);
@@ -443,19 +494,19 @@ impl CompassUi {
         let placement = self.placement;
         self.game_found = placement.game_found;
 
-        let own_focus = ctx.input(|i| i.focused);
-        if !overlay_should_show(
-            self.app.overlay_enabled(),
-            placement.game_focused,
-            own_focus,
-        ) {
+        // Disabled means the window itself goes; that is the one deliberate
+        // destroy, and it is a user action, not a focus flicker.
+        if !self.app.overlay_enabled() {
             return;
         }
 
-        self.rebuild_overlay_spectrogram(ctx);
+        let own_focus = ctx.input(|i| i.focused);
+        let visible = overlay_visible(placement.game_found, placement.game_focused, own_focus);
 
-        let mut state = compact::OverlayState::from_app(&self.app);
-        state.game_found = placement.game_found;
+        if visible {
+            self.rebuild_overlay_spectrogram(ctx);
+        }
+        let mut state = overlay::OverlayState::from_app(&self.app);
         state.spectrogram = self
             .overlay_texture
             .clone()
@@ -469,6 +520,12 @@ impl CompassUi {
             .with_transparent(true)
             // Click-through, so it can never steal a click meant for the cockpit.
             .with_mouse_passthrough(true)
+            // Never take focus — not even on creation. The game keeps keyboard
+            // and mouse; we are paint, not a window anyone interacts with.
+            .with_active(false)
+            // Hidden rather than absent when the game loses focus. egui diffs
+            // the builder and toggles visibility on the existing window.
+            .with_visible(visible)
             // No taskbar entry and no Alt-Tab stop: it is not a window you are
             // ever meant to interact with, and it cannot be lost behind
             // anything because the control window owns the process.
@@ -476,11 +533,16 @@ impl CompassUi {
             .with_always_on_top();
 
         ctx.show_viewport_deferred(overlay_viewport_id(), builder, move |ctx, _class| {
+            if !visible {
+                // Nothing to draw and nothing changing; idle until re-shown.
+                ctx.request_repaint_after(Duration::from_millis(500));
+                return;
+            }
             // No frame and no background: whatever is not painted stays
             // transparent and the cockpit shows through.
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(ctx, |ui| compact::overlay(ui, &state));
+                .show(ctx, |ui| overlay::overlay(ui, &state));
             ctx.request_repaint_after(Duration::from_millis(66));
         });
     }
@@ -758,15 +820,13 @@ impl eframe::App for CompassUi {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.sync_overlay(&ui.ctx().clone());
 
-        if self.view == View::Compact {
-            return self.draw_compact(ui);
-        }
-
         egui::Panel::top("header").show(ui, |ui| {
             ui.add_space(4.0);
             self.header(ui);
             ui.add_space(2.0);
             self.detectors(ui);
+            ui.add_space(2.0);
+            self.controls_row(ui);
             ui.add_space(4.0);
         });
 
@@ -791,6 +851,7 @@ impl eframe::App for CompassUi {
             if let Some(s) = &self.snapshot {
                 controls::health_strip(ui, s);
             }
+            overlay::disk_usage(ui, &mut self.app);
         });
 
         egui::CentralPanel::default().show(ui, |ui| {
@@ -807,29 +868,23 @@ mod tests {
 
     #[test]
     fn the_overlay_follows_the_game_s_focus() {
+        assert!(overlay_visible(true, true, false), "Elite in front: show");
         assert!(
-            overlay_should_show(true, true, false),
-            "Elite in front: show"
-        );
-        assert!(
-            !overlay_should_show(true, false, false),
+            !overlay_visible(true, false, false),
             "Alt-Tabbed away: the overlay must go with it, not float over the browser"
         );
         assert!(
-            overlay_should_show(true, false, true),
+            overlay_visible(true, false, true),
             "our own window in front: show, so the toggles have a visible effect"
         );
     }
 
     #[test]
-    fn turning_the_overlay_off_beats_any_focus() {
-        for game in [false, true] {
-            for own in [false, true] {
-                assert!(
-                    !overlay_should_show(false, game, own),
-                    "game={game} own={own}"
-                );
-            }
+    fn no_game_window_means_no_overlay_at_all() {
+        // Regression: the overlay used to appear over the bare desktop whenever
+        // the control panel had focus, flashing as it fought itself for focus.
+        for own in [false, true] {
+            assert!(!overlay_visible(false, false, own), "own_focus={own}");
         }
     }
 

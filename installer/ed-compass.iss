@@ -61,12 +61,11 @@ Source: "..\LICENSE";                     DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 ; The control panel is the thing you launch. The overlay appears by itself when
 ; Elite has focus, so it needs no shortcut of its own.
-Name: "{group}\{#AppName}";       Filename: "{app}\{#AppExeName}"; Parameters: "--compact"
-Name: "{group}\{#AppName} (full)"; Filename: "{app}\{#AppExeName}"; Parameters: "--view full"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Parameters: "--compact"; Tasks: desktopicon
+Name: "{group}\{#AppName}";       Filename: "{app}\{#AppExeName}"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Parameters: "--compact"; \
+Filename: "{app}\{#AppExeName}"; \
   Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; \
   Flags: nowait postinstall skipifsilent
 

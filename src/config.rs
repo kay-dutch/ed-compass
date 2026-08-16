@@ -26,7 +26,11 @@ impl IgnoreBand {
 ///
 /// 2: indicators moved to a left-hand column with the spectrogram filling the
 ///    full height, anchored to the game window's top-left corner.
-pub const OVERLAY_LAYOUT_REVISION: u32 = 2;
+/// 3: twice as wide, still flush left. Also rescues every file stamped with
+///    revision 2 while carrying revision-1 geometry: the missing-key default
+///    used to *be* the current revision, so real pre-revision configs were
+///    marked migrated without being touched.
+pub const OVERLAY_LAYOUT_REVISION: u32 = 3;
 
 /// Whether files can actually be created in a directory.
 ///
@@ -143,8 +147,6 @@ pub struct Config {
     pub detector_capture_seconds: f32,
 
     // ---- overlay ----
-    /// Which view to open in: "full", "compact", or "overlay".
-    pub view: String,
     /// Overlay centre as a fraction of the game window width. The default 0.375
     /// is a quarter of the way from the centre toward the left edge.
     pub overlay_x_fraction: f32,
@@ -165,6 +167,14 @@ pub struct Config {
     /// but when the layout itself is redesigned, keeping the old numbers gives a
     /// window sized for a arrangement that no longer exists. Bumping
     /// [`OVERLAY_LAYOUT_REVISION`] resets just the geometry, once.
+    ///
+    /// The field-level default is 0, deliberately overriding the struct-level
+    /// `#[serde(default)]`. The struct default fills a missing key from
+    /// `Config::default()` — the *current* revision — which told the migration
+    /// "already done" for exactly the old files it existed to fix, and then
+    /// wrote that claim back to disk. A missing key means "before the scheme
+    /// existed", and only 0 says that.
+    #[serde(default)]
     pub overlay_layout_revision: u32,
     /// Draw a spectrogram beside the overlay lamps, at full overlay height.
     pub overlay_spectrogram: bool,
@@ -282,17 +292,18 @@ impl Default for Config {
             structure_threshold: 0.35,
             detector_capture_seconds: 130.0,
 
-            view: "compact".into(),
             overlay_enabled: true,
             overlay_layout_revision: OVERLAY_LAYOUT_REVISION,
             // Hard against the top-left corner: nothing of Elite's own HUD
             // lives there, and it leaves the centre and right panels clear.
             overlay_x_fraction: 0.0,
             overlay_y_fraction: 0.0,
-            overlay_width: 440.0,
+            overlay_width: 880.0,
             overlay_height: 104.0,
             overlay_spectrogram: true,
-            overlay_label_fraction: 0.34,
+            // At 880 wide the lamp column needs no third of the panel; 0.2
+            // keeps it ~176 px and gives everything else to the spectrogram.
+            overlay_label_fraction: 0.2,
             overlay_spectrogram_seconds: 140.0,
             export_dir: None,
             export_width: 8192,
@@ -404,11 +415,6 @@ impl Config {
              (revision {} -> {OVERLAY_LAYOUT_REVISION})",
             self.overlay_layout_revision
         );
-        // The overlay stopped being a view you switch into at the same time,
-        // so a config that opens straight into it has nowhere to go.
-        if self.view == "overlay" {
-            self.view = "compact".into();
-        }
         let d = Config::default();
         self.overlay_x_fraction = d.overlay_x_fraction;
         self.overlay_y_fraction = d.overlay_y_fraction;
@@ -466,13 +472,6 @@ impl Config {
             matches!(self.capture_format.as_str(), "flac" | "wav"),
             "capture_format must be \"flac\" or \"wav\", got {:?}",
             self.capture_format
-        );
-        anyhow::ensure!(
-            matches!(self.view.as_str(), "full" | "compact"),
-            "view must be \"full\" or \"compact\", got {:?}. The overlay is no \
-             longer a view you start into — it appears whenever Elite has focus, \
-             and `overlay_enabled` turns it off",
-            self.view
         );
         anyhow::ensure!(
             self.overlay_width >= 80.0 && self.overlay_height >= 30.0,
@@ -691,37 +690,67 @@ mod tests {
     }
 
     #[test]
-    fn a_config_from_the_old_overlay_layout_has_its_geometry_restored() {
+    fn a_file_from_before_the_revision_scheme_is_migrated() {
+        // A real pre-revision config has NO revision key at all. The first
+        // version of this test wrote the key explicitly, so it never exercised
+        // the missing-key path — which defaulted to the current revision and
+        // skipped the migration for exactly the files it was written for.
         let dir =
             std::env::temp_dir().join(format!("ed-compass-overlay-migrate-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("config.toml");
 
-        // What the previous layout wrote: centre-left, sized for stacked lamps.
         let mut old = Config::default();
-        old.overlay_layout_revision = 1;
         old.overlay_x_fraction = 0.375;
-        old.overlay_y_fraction = 0.02;
-        old.overlay_height = 78.0;
-        old.view = "overlay".into(); // a view that no longer exists
+        old.overlay_width = 300.0;
         old.detect_keying = false; // a real preference, not geometry
-        old.save(&path).expect("save");
+        let mut text = toml::to_string_pretty(&old).expect("serialize");
+        text = text
+            .lines()
+            .filter(|l| !l.starts_with("overlay_layout_revision"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, text).expect("write");
 
         let loaded = Config::load_or_create(&path).expect("load");
         let d = Config::default();
         assert_eq!(loaded.overlay_x_fraction, d.overlay_x_fraction);
-        assert_eq!(loaded.overlay_height, d.overlay_height);
+        assert_eq!(loaded.overlay_width, d.overlay_width);
         assert_eq!(loaded.overlay_layout_revision, OVERLAY_LAYOUT_REVISION);
-        assert_eq!(
-            loaded.view, "compact",
-            "the overlay view has no window to open"
-        );
         assert!(
             !loaded.detect_keying,
             "unrelated settings must be preserved"
         );
 
-        // And the migration is not repeated once it has been written back.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_falsely_stamped_migrated_by_the_old_bug_is_rescued() {
+        // What the missing-key bug actually produced in the field: revision 2
+        // written back beside untouched revision-1 geometry. Bumping to 3 is
+        // what un-sticks these files.
+        let dir =
+            std::env::temp_dir().join(format!("ed-compass-overlay-rescue-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.toml");
+
+        let mut poisoned = Config::default();
+        poisoned.overlay_layout_revision = 2;
+        poisoned.overlay_x_fraction = 0.375;
+        poisoned.overlay_y_fraction = 0.02;
+        poisoned.overlay_width = 300.0;
+        poisoned.overlay_height = 78.0;
+        poisoned.save(&path).expect("save");
+
+        let loaded = Config::load_or_create(&path).expect("load");
+        let d = Config::default();
+        assert_eq!(loaded.overlay_x_fraction, d.overlay_x_fraction);
+        assert_eq!(loaded.overlay_width, d.overlay_width);
+        assert_eq!(loaded.overlay_height, d.overlay_height);
+        assert_eq!(loaded.overlay_layout_revision, OVERLAY_LAYOUT_REVISION);
+
+        // And a deliberate move after migration sticks.
         let mut moved = loaded;
         moved.overlay_x_fraction = 0.5;
         moved.save(&path).expect("save");

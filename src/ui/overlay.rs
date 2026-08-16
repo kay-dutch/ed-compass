@@ -1,44 +1,18 @@
-//! The compact control panel, and the in-game overlay.
+//! The in-game overlay, and the small widgets shared with the main window.
 //!
-//! The full analysis window is for looking at afterwards. These are for while
-//! you are flying — the compact panel to arm the thing before you undock, and
-//! the overlay to sit in the cockpit and tell you something is happening.
+//! There used to be a third window shape — a "compact" control panel — whose
+//! job was to be small enough to keep near the game. The overlay made it
+//! redundant: it appears by itself whenever Elite has focus, the way
+//! SrvSurvey's panels do, and the main window holds the controls. One window
+//! plus the overlay is the whole model.
 //!
-//! The overlay is not a *view*: it is a second window that appears by itself
-//! whenever Elite has focus, the way SrvSurvey's panels do. It is therefore
-//! drawn from a plain [`OverlayState`] rather than from [`App`], because it is
-//! rendered from a viewport callback that cannot borrow the application.
+//! The overlay is drawn from a plain [`OverlayState`] rather than from [`App`],
+//! because it renders in a viewport callback that cannot borrow the
+//! application.
 
 use eframe::egui;
 
 use crate::app::App;
-
-/// Which window shape the application is currently showing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum View {
-    /// The full analysis window: waterfall, compass, events.
-    Full,
-    /// A small control panel with the indicators and the toggles.
-    Compact,
-}
-
-impl View {
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "full" => View::Full,
-            // "overlay" was a third view before the overlay became its own
-            // window; a config written back then must still open something.
-            _ => View::Compact,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            View::Full => "full",
-            View::Compact => "compact",
-        }
-    }
-}
 
 /// Elite's own HUD palette, sampled from a cockpit screenshot rather than
 /// guessed at, so the overlay reads as part of the game's interface instead of
@@ -59,62 +33,7 @@ pub mod hud {
     pub const CYAN: Color32 = Color32::from_rgb(203, 249, 251);
 }
 
-pub const LIT: egui::Color32 = egui::Color32::from_rgb(120, 255, 160);
-pub const DIM: egui::Color32 = egui::Color32::from_rgb(70, 78, 74);
-pub const WARN: egui::Color32 = egui::Color32::from_rgb(255, 210, 90);
-
-/// One indicator lamp with a label.
-pub fn lamp(ui: &mut egui::Ui, label: &str, lit: bool, detail: &str, size: f32) {
-    lamp_coloured(ui, label, lit, detail, size, LIT)
-}
-
-/// A lamp with an explicit lit colour, so a suspect detection can read amber.
-pub fn lamp_coloured(
-    ui: &mut egui::Ui,
-    label: &str,
-    lit: bool,
-    detail: &str,
-    size: f32,
-    lit_colour: egui::Color32,
-) {
-    let colour = if lit { lit_colour } else { DIM };
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-        let painter = ui.painter();
-        painter.circle_filled(rect.center(), size * 0.38, colour);
-        if lit {
-            // A soft ring, so a lit lamp reads at a glance in peripheral vision.
-            painter.circle_stroke(
-                rect.center(),
-                size * 0.5,
-                egui::Stroke::new(1.5, colour.gamma_multiply(0.5)),
-            );
-        }
-        ui.vertical(|ui| {
-            ui.label(
-                egui::RichText::new(label)
-                    .monospace()
-                    .size(size * 0.5)
-                    .strong()
-                    .color(if lit {
-                        lit_colour
-                    } else {
-                        egui::Color32::from_gray(150)
-                    }),
-            );
-            if !detail.is_empty() {
-                ui.label(
-                    egui::RichText::new(detail)
-                        .monospace()
-                        .size(size * 0.36)
-                        .color(egui::Color32::from_gray(150)),
-                );
-            }
-        });
-    });
-}
-
-/// The period readout, which is the evidence that matters.
+/// The headline number: the measured period and its confidence.
 pub fn period_detail(app: &App) -> String {
     match app.periodicity() {
         Some(p) => format!("{:.1}s conf {:.2}", p.period_seconds, p.confidence),
@@ -149,121 +68,12 @@ pub fn detail_lines(app: &App) -> (String, String) {
     (keying, structure)
 }
 
-/// The compact control panel. Returns a view to switch to, if the user asked.
-pub fn panel(ui: &mut egui::Ui, app: &mut App) -> Option<View> {
-    let mut switch = None;
-    let (keying_on, structure_on) = app.detections_present();
-    let (keying_detail, structure_detail) = detail_lines(app);
-
-    ui.horizontal(|ui| {
-        let status = app.status();
-        ui.label(
-            egui::RichText::new(status.label())
-                .monospace()
-                .size(12.0)
-                .color(super::controls::status_colour(status)),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("full view").clicked() {
-                switch = Some(View::Full);
-            }
-        });
-    });
-
-    ui.add_space(4.0);
-    // The headline. Structure and keying overlap with ordinary ship ambience;
-    // only the period separates the real signal, so it leads.
-    lamp(
-        ui,
-        "LANDSCAPE",
-        app.landscape_present(),
-        &period_detail(app),
-        30.0,
-    );
-    ui.add_space(2.0);
-    let keying_colour = if app.keying_suspect() { WARN } else { LIT };
-    lamp_coloured(
-        ui,
-        "transmission",
-        keying_on,
-        &keying_detail,
-        22.0,
-        keying_colour,
-    );
-    lamp(ui, "structure", structure_on, &structure_detail, 22.0);
-    ui.add_space(4.0);
-    ui.separator();
-
-    // Controls. Each is read back from the app so the widget can never drift
-    // out of step with what is actually running.
-    // Bound to "listening", which is the inverse of paused — binding the
-    // checkbox straight to `paused` would have made ticking it stop analysis.
-    let mut listening = !app.is_paused();
-    if ui
-        .checkbox(&mut listening, "Listening")
-        .on_hover_text("Unchecked suspends analysis. The audio device stays open.")
-        .changed()
-    {
-        app.set_paused(!listening);
-    }
-
-    let mut overlay = app.overlay_enabled();
-    if ui
-        .checkbox(&mut overlay, "In-game overlay")
-        .on_hover_text(
-            "Shows the indicators over the cockpit whenever Elite has focus, \
-             and hides them again when it does not. This window stays open \
-             either way.",
-        )
-        .changed()
-    {
-        app.set_overlay_enabled(overlay);
-    }
-
-    let mut keying = app.detect_keying();
-    let mut structure = app.detect_structure();
-    let a = ui.checkbox(&mut keying, "Detect transmissions").changed();
-    let b = ui.checkbox(&mut structure, "Detect pictures").changed();
-    if a || b {
-        app.set_detectors(keying, structure);
-    }
-
-    ui.add_space(4.0);
-    disk_usage(ui, app);
-
-    ui.add_space(2.0);
-    if ui
-        .button("Keep last 60 s")
-        .on_hover_text("Write the recent audio to the captures folder right now.")
-        .clicked()
-    {
-        match app.keep_recent(60.0, "manual") {
-            Ok(path) => log::info!("kept {}", path.display()),
-            Err(e) => log::warn!("could not keep audio: {e:#}"),
-        }
-    }
-
-    let mut df = app.direction_finding();
-    if ui
-        .checkbox(&mut df, "Direction finding")
-        .on_hover_text(
-            "Secondary. Costs one transform per channel instead of one, and keeps every \
-             channel in memory. Switching it rebuilds the analysis engine and loses history.",
-        )
-        .changed()
-    {
-        app.set_direction_finding(df);
-    }
-
-    switch
-}
-
 /// How much disk the recordings are costing, and a way to reclaim it.
 ///
 /// Shown because the alternative is finding out from Windows. The record count
 /// is deliberately separate from the audio size: records are never deleted, so
 /// that number only goes up, and it is the one that represents the work.
-fn disk_usage(ui: &mut egui::Ui, app: &mut App) {
+pub fn disk_usage(ui: &mut egui::Ui, app: &mut App) {
     let usage = app.disk_usage(false);
 
     let bar = |ui: &mut egui::Ui, label: &str, used: u64, budget: u64| {
@@ -337,9 +147,6 @@ pub struct OverlayState {
     pub period_detail: String,
     pub keying_detail: String,
     pub structure_detail: String,
-    /// False when the game window could not be found, so the overlay can say so
-    /// rather than sit blank over the desktop.
-    pub game_found: bool,
     pub spectrogram: Option<egui::TextureHandle>,
     /// Share of the width given to the indicator column.
     pub label_fraction: f32,
@@ -358,7 +165,6 @@ impl OverlayState {
             period_detail: period_detail(app),
             keying_detail,
             structure_detail,
-            game_found: false,
             spectrogram: None,
             label_fraction: app.config().overlay_label_fraction,
         }
@@ -408,19 +214,6 @@ pub fn overlay(ui: &mut egui::Ui, state: &OverlayState) {
             egui::Stroke::new(1.0, hud::IDLE),
         );
         column.max.x = image.left() - 4.0;
-    }
-
-    // The warning takes a slim strip off the bottom of the indicator column, so
-    // it never lands on top of a lamp.
-    if !state.game_found {
-        painter.text(
-            egui::pos2(column.left(), column.bottom()),
-            egui::Align2::LEFT_BOTTOM,
-            "no game window",
-            egui::FontId::monospace(9.0),
-            hud::RED,
-        );
-        column.max.y -= 11.0;
     }
 
     let row_h = column.height() / 3.0;
@@ -506,28 +299,6 @@ fn hud_lamp(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn view_names_round_trip() {
-        for v in [View::Full, View::Compact] {
-            assert_eq!(View::parse(v.as_str()), v);
-        }
-    }
-
-    #[test]
-    fn an_unknown_view_falls_back_to_compact() {
-        assert_eq!(View::parse("nonsense"), View::Compact);
-        assert_eq!(View::parse(""), View::Compact);
-        // Saved by a version where the overlay was a view you switched into.
-        assert_eq!(View::parse("overlay"), View::Compact);
-    }
-
-    #[test]
-    fn a_lit_lamp_is_visibly_different_from_a_dark_one() {
-        let sum = |c: egui::Color32| c.r() as u32 + c.g() as u32 + c.b() as u32;
-        assert!(sum(LIT) > sum(DIM) * 2, "a lit lamp must stand out");
-        assert!(LIT.g() > LIT.r(), "lit reads as good");
-    }
 
     #[test]
     fn the_overlay_palette_is_elite_s_own() {
