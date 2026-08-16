@@ -121,3 +121,6 @@ Developments plc; this is an unofficial tool, not affiliated with or endorsed by
 Frontier.
 
 o7
+
+[![Licence](https://img.shields.io/github/license/tbma2014us/ed-compass?style=for-the-badge)](./LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)](#)
