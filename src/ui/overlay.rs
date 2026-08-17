@@ -214,6 +214,12 @@ impl OverlayAttention {
 /// be `Send + Sync`, so it cannot hold a reference to the application. Copying
 /// the handful of values it needs is both cheaper and simpler than the
 /// alternatives.
+/// Everything the overlay draws.
+///
+/// `Default` deliberately paints nothing: the shared cell is created before the
+/// first game-window poll, and an overlay that paints itself before anyone has
+/// decided it should be seen is an overlay that flashes over the desktop at
+/// launch.
 #[derive(Clone, Default)]
 pub struct OverlayState {
     pub landscape: bool,
@@ -231,6 +237,10 @@ pub struct OverlayState {
     /// ("Texture with 'egui_texid_Managed(3)' label is invalid"). The overlay
     /// uploads these pixels inside its own pass and owns the result.
     pub spectrogram: Option<egui::ColorImage>,
+    /// False when the overlay window is open but should show nothing. The
+    /// window is never closed — see `CompassUi::sync_overlay` — so this is what
+    /// makes it invisible.
+    pub showing: bool,
     /// True when analysis is not actually running — warming up, starting, or
     /// the device is gone. Dark lamps otherwise mean "nothing found", and there
     /// is no way to tell that from "not listening".
@@ -255,6 +265,8 @@ impl OverlayState {
             keying_detail,
             structure_detail,
             spectrogram: None,
+            // Set by the caller, which owns the visibility decision.
+            showing: false,
             attention: OverlayAttention::of(app.status()),
             direction: None,
         }
@@ -419,10 +431,30 @@ fn hud_lamp(
 /// dead ahead reads as nothing until the ship yaws a few degrees.
 pub const ROSE_DEADBAND_DEG: f32 = 3.0;
 
-/// The bearing the rose should show, if any.
-pub fn rose_bearing(estimate: &DirectionEstimate) -> Option<f32> {
-    (estimate.is_usable() && estimate.azimuth_deg.abs() >= ROSE_DEADBAND_DEG)
-        .then_some(estimate.azimuth_deg)
+/// What the rose should draw for a given estimate.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum RoseNeedle {
+    /// Off-axis by more than the dead-band: a bearing worth flying towards.
+    Bearing(f32),
+    /// Inside the dead-band. Balanced ambience pans dead centre, so this is
+    /// the null result, and it is drawn in a colour that says so.
+    Centred(f32),
+}
+
+/// What the rose should draw, if anything.
+///
+/// `None` only when there is no usable estimate at all — a mono source, or
+/// direction finding still warming up. A centred bearing is a real measurement
+/// and is shown as one, just not as a find.
+pub fn rose_needle(estimate: &DirectionEstimate) -> Option<RoseNeedle> {
+    if !estimate.is_usable() {
+        return None;
+    }
+    Some(if estimate.azimuth_deg.abs() >= ROSE_DEADBAND_DEG {
+        RoseNeedle::Bearing(estimate.azimuth_deg)
+    } else {
+        RoseNeedle::Centred(estimate.azimuth_deg)
+    })
 }
 
 /// A miniature bearing rose: the full view's compass, reduced to what reads at
@@ -452,18 +484,28 @@ fn hud_rose(painter: &egui::Painter, rect: egui::Rect, estimate: &DirectionEstim
         );
     }
 
-    if let Some(azimuth_deg) = rose_bearing(estimate) {
+    if let Some(needle_state) = rose_needle(estimate) {
+        // Green means "look at this"; red means "measured, and it is nothing".
+        // Keeping the eye trained on green is the whole point of the dead-band.
+        let (azimuth_deg, colour, ghost) = match needle_state {
+            RoseNeedle::Bearing(a) => (a, hud::GREEN, true),
+            // Dark orange, the same colour as every other inactive element:
+            // present and readable, but it does not pull the eye. Red did.
+            RoseNeedle::Centred(a) => (a, hud::AMBER, false),
+        };
         let confidence = estimate.confidence.clamp(0.0, 1.0);
         let needle = azimuth_to_vec(azimuth_deg) * radius * (0.25 + 0.75 * confidence);
         painter.line_segment(
             [centre, centre + needle],
-            egui::Stroke::new(2.0, hud::GREEN.gamma_multiply(0.4 + 0.6 * confidence)),
+            egui::Stroke::new(2.0, colour.gamma_multiply(0.4 + 0.6 * confidence)),
         );
-        if estimate.front_back_ambiguous {
+        // No mirrored ghost for a centred needle: front and back are the same
+        // direction there, so the second line would say nothing.
+        if ghost && estimate.front_back_ambiguous {
             let mirror = azimuth_to_vec(180.0 - azimuth_deg) * radius * 0.5;
             painter.line_segment(
                 [centre, centre + mirror],
-                egui::Stroke::new(1.0, hud::GREEN.gamma_multiply(0.25)),
+                egui::Stroke::new(1.0, colour.gamma_multiply(0.25)),
             );
         }
         painter.text(
@@ -471,7 +513,7 @@ fn hud_rose(painter: &egui::Painter, rect: egui::Rect, estimate: &DirectionEstim
             egui::Align2::CENTER_BOTTOM,
             format!("{:+.0}\u{00b0}", azimuth_deg),
             egui::FontId::monospace(9.0),
-            hud::ORANGE,
+            colour,
         );
     } else {
         painter.text(
@@ -489,7 +531,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_centred_bearing_draws_no_needle() {
+    fn a_centred_bearing_is_shown_but_marked_as_nothing() {
         use crate::analysis::direction::{DirectionEstimate, DirectionMethod};
         let mut e = DirectionEstimate {
             azimuth_deg: 0.0,
@@ -497,20 +539,29 @@ mod tests {
             method: DirectionMethod::StereoPanLaw,
             front_back_ambiguous: true,
         };
-        // Balanced ambience pans centre; a permanently green needle is noise.
-        assert_eq!(rose_bearing(&e), None);
+        // Balanced ambience pans centre, so a centred needle is the null
+        // result — drawn, but never in the colour that means "look here".
+        assert_eq!(rose_needle(&e), Some(RoseNeedle::Centred(0.0)));
         e.azimuth_deg = 2.9;
-        assert_eq!(rose_bearing(&e), None, "inside the dead-band");
+        assert_eq!(rose_needle(&e), Some(RoseNeedle::Centred(2.9)));
         e.azimuth_deg = -2.9;
-        assert_eq!(rose_bearing(&e), None, "the dead-band is symmetric");
+        assert_eq!(
+            rose_needle(&e),
+            Some(RoseNeedle::Centred(-2.9)),
+            "the dead-band is symmetric"
+        );
 
         e.azimuth_deg = 3.0;
-        assert_eq!(rose_bearing(&e), Some(3.0), "at the edge it shows");
+        assert_eq!(
+            rose_needle(&e),
+            Some(RoseNeedle::Bearing(3.0)),
+            "at the edge it becomes a bearing"
+        );
         e.azimuth_deg = -38.0;
-        assert_eq!(rose_bearing(&e), Some(-38.0));
+        assert_eq!(rose_needle(&e), Some(RoseNeedle::Bearing(-38.0)));
 
         e.method = DirectionMethod::Insufficient;
-        assert_eq!(rose_bearing(&e), None, "unusable estimates never show");
+        assert_eq!(rose_needle(&e), None, "no usable estimate draws nothing");
     }
 
     /// The column must fit the text it draws, and not much more.
@@ -571,6 +622,27 @@ mod tests {
         state.spectrogram = Some(egui::ColorImage::filled([4, 2], egui::Color32::RED));
         let carried = state.spectrogram.expect("pixels");
         assert_eq!(carried.size, [4, 2]);
+    }
+
+    #[test]
+    fn the_centred_needle_recedes_and_only_a_real_bearing_stands_out() {
+        let sum = |c: egui::Color32| c.r() as u32 + c.g() as u32 + c.b() as u32;
+        // A centred needle is the null result: it must be legible but must not
+        // compete with a real detection for attention.
+        // Green 455 against amber 264: brighter, and a different hue family,
+        // which is what keeps the eye hunting for green rather than scanning.
+        assert!(
+            sum(hud::GREEN) > sum(hud::AMBER),
+            "the find colour must be the brighter of the two"
+        );
+        assert!(
+            hud::GREEN.g() > hud::GREEN.r() * 2 && hud::GREEN.g() > hud::GREEN.b() * 2,
+            "a real bearing reads green"
+        );
+        assert!(
+            hud::AMBER.r() > hud::AMBER.g() && hud::AMBER.b() == 0,
+            "a centred bearing reads as dark orange, like every other idle element"
+        );
     }
 
     #[test]

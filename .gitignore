@@ -1,6 +1,10 @@
 /target
 /dist
 
+# cargo-mutants working directories.
+/mutants.out
+/mutants.out.old
+
 # Build artefacts of the installer.
 /installer/*.exe
 

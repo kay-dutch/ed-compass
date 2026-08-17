@@ -251,6 +251,11 @@ impl App {
         if let Some(format) = self.last_format.clone() {
             self.engine = Some(AnalysisEngine::new(self.cfg.clone(), format));
             self.pending.clear();
+            // A format means the endpoint is delivering again, so any recorded
+            // failure is history. Clearing it together with the status keeps
+            // the two from contradicting each other — "warming up" beside a
+            // stale "device lost" message helps nobody.
+            self.error = None;
             self.status = Status::Warming;
         }
     }
@@ -907,6 +912,15 @@ mod tests {
             tx.clone(),
         );
         let mut app = App::new(cfg, "dev".into(), capture, rx, dir.clone());
+
+        // Let the stream establish itself first. Sending the error immediately
+        // raced the capture thread's own `Format` message, and a format means
+        // the device is working — so the rebuild cleared the very error this
+        // test was asserting, roughly half the time.
+        assert!(
+            pump_until(&mut app, 15.0, |a| a.format().is_some()),
+            "the stream never started"
+        );
 
         tx.send(CaptureMessage::Error("the endpoint went away".into()))
             .unwrap();

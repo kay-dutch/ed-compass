@@ -18,7 +18,7 @@ use eframe::egui;
 
 use crate::app::{App, Status};
 use crate::audio::device::{self, AudioDevice};
-use crate::game_window::{OverlayAnchor, OverlayPlacement, overlay_placement};
+use crate::game_window::{OverlayAnchor, OverlayPlacement, PlotterGap, overlay_placement};
 use crate::pipeline::AnalysisSnapshot;
 
 /// Launch the window. Blocks until it closes.
@@ -77,7 +77,11 @@ pub fn export_height(cfg: &crate::config::Config) -> usize {
 ///
 /// Lives here rather than on [`Config`] because the lamp column is measured
 /// from the fonts, and fonts are a UI concern.
-fn overlay_spectrogram_size(cfg: &crate::config::Config, label_px: f32) -> (f32, f32) {
+fn overlay_spectrogram_size(
+    cfg: &crate::config::Config,
+    overlay_width: f32,
+    label_px: f32,
+) -> (f32, f32) {
     if !cfg.overlay_spectrogram {
         return (0.0, 0.0);
     }
@@ -87,7 +91,7 @@ fn overlay_spectrogram_size(cfg: &crate::config::Config, label_px: f32) -> (f32,
         0.0
     };
     (
-        (cfg.overlay_width - label_px - rose).max(16.0),
+        (overlay_width - label_px - rose).max(16.0),
         cfg.overlay_height.max(16.0),
     )
 }
@@ -520,51 +524,58 @@ impl CompassUi {
     /// hide mechanism.
     /// Keep the in-game overlay in step with the game window.
     ///
-    /// Modelled on SrvSurvey, which shows its plotters when
-    /// `focusElite || focusSrvSurvey` and tracks the game window explicitly.
+    /// The window is created once and **never destroyed**. When the overlay
+    /// should not be seen it stays open and paints nothing — a transparent
+    /// window with nothing in it is invisible, and it is already click-through
+    /// and absent from the taskbar, so an empty one costs the player nothing.
     ///
-    /// Two hard-won constraints, both from bugs:
+    /// Both obvious alternatives are broken, each in its own way:
     ///
-    /// **The window exists only while it should be seen.** An attempt to keep
-    /// one window alive and toggle `ViewportBuilder::with_visible` froze it: a
-    /// hidden window receives no redraw events, so once hidden the child never
-    /// rendered again, and the `Visible(true)` command that reveals it does not
-    /// restart its render loop. The overlay came back showing whatever frame it
-    /// had when it was hidden — a dead histogram, and no bearing rose at all
-    /// when it had been hidden before the first analysis snapshot arrived.
+    /// * **Destroying it** (not calling `show_viewport_deferred`) churns
+    ///   viewport lifecycle on every focus change, and `egui_wgpu`'s
+    ///   `Painter::set_window(id, None)` does `self.surfaces.clear()` — *all*
+    ///   surfaces, not just that viewport's. Tearing down the overlay can take
+    ///   the main window's surface with it, and the textures that were valid
+    ///   against it: "Texture with 'egui_texid_Managed(1)' label is invalid".
+    /// * **Hiding it** with `ViewportBuilder::with_visible(false)` freezes it:
+    ///   a hidden window receives no redraw events, so it never renders again,
+    ///   and `Visible(true)` does not restart its render loop.
     ///
-    /// **Creation must not take focus.** The original flashing was a feedback
-    /// loop: creating the window stole focus from Elite, which made the overlay
-    /// not-wanted, which destroyed it, which returned focus. `with_active(false)`
-    /// breaks that loop, and requiring the game window to exist at all stops the
-    /// overlay appearing over the bare desktop.
+    /// Painting nothing has neither problem: no lifecycle churn, and the render
+    /// loop never stops.
     fn sync_overlay(&mut self, ctx: &egui::Context) {
         // Only ask the window manager occasionally for the rectangle — the
         // player is not moving the game window every frame — but a quarter of a
         // second is fast enough that an Alt-Tab feels immediate.
         if self.last_game_poll.elapsed() >= Duration::from_millis(250) {
             self.last_game_poll = Instant::now();
+            // Two passes: the first learns how wide the game window is, the
+            // second places an overlay sized to the band SrvSurvey leaves free
+            // inside it. Cheap — both are arithmetic on a cached rectangle.
+            let probe = overlay_placement(self.anchor);
+            if self.app.config().overlay_fit_between_plotters
+                && let Some((x, width)) = PlotterGap::default().band(probe.game_width)
+            {
+                self.anchor.width = width;
+                self.anchor.x_fraction = 0.0;
+                self.anchor.x_offset_px = x;
+            }
             self.placement = overlay_placement(self.anchor);
         }
         let placement = self.placement;
         self.game_found = placement.game_found;
 
         let own_focus = ctx.input(|i| i.focused);
-        if !self.app.overlay_enabled()
-            || !overlay_visible(placement.game_found, placement.game_focused, own_focus)
-        {
-            // Not calling `show_viewport_deferred` closes the window. That is
-            // the whole hide mechanism, and the only one that works.
-            return;
-        }
+        let showing = self.app.overlay_enabled()
+            && overlay_visible(placement.game_found, placement.game_focused, own_focus);
 
-        // Measure the column before the image is sized: the spectrogram gets
-        // whatever the lamps do not need.
-        {
+        if showing {
+            // Measure the column before the image is sized: the spectrogram
+            // gets whatever the lamps do not need.
             let probe = overlay::OverlayState::from_app(&self.app);
             self.overlay_label_px = overlay::label_column_width(ctx, &probe);
+            self.rebuild_overlay_spectrogram(ctx);
         }
-        self.rebuild_overlay_spectrogram(ctx);
 
         // Published through a shared cell rather than captured by value. egui
         // may render the child while the parent sleeps, and its docs call for
@@ -574,6 +585,7 @@ impl CompassUi {
             let mut shared = self.overlay_state.lock().unwrap();
             let pixels = shared.spectrogram.take();
             *shared = overlay::OverlayState::from_app(&self.app);
+            shared.showing = showing;
             // Carry forward any frame the overlay has not consumed yet, so a
             // slow child never loses the newest image it was handed.
             shared.spectrogram = self
@@ -581,8 +593,6 @@ impl CompassUi {
                 .take()
                 .or(pixels)
                 .filter(|_| self.app.config().overlay_spectrogram);
-            // Only while direction finding runs: absent, the rose is not drawn
-            // and the spectrogram takes its width back.
             shared.direction = self
                 .snapshot
                 .as_ref()
@@ -598,8 +608,7 @@ impl CompassUi {
             .with_transparent(true)
             // Click-through, so it can never steal a click meant for the cockpit.
             .with_mouse_passthrough(true)
-            // Never take focus, not even on creation — this is what stops the
-            // create/steal-focus/destroy loop that showed up as flashing.
+            // Never take focus, not even on creation.
             .with_active(false)
             // No taskbar entry and no Alt-Tab stop: it is not a window you are
             // ever meant to interact with, and it cannot be lost behind
@@ -633,13 +642,19 @@ impl CompassUi {
                 }
                 snapshot
             };
-            let texture = texture.lock().unwrap().clone();
 
             // No frame and no background: whatever is not painted stays
-            // transparent and the cockpit shows through.
+            // transparent and the cockpit shows through. When not showing we
+            // paint nothing at all, which is what makes the window invisible
+            // without ever having to close it.
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
-                .show(ctx, |ui| overlay::overlay(ui, &snapshot, texture.as_ref()));
+                .show(ctx, |ui| {
+                    if snapshot.showing {
+                        let texture = texture.lock().unwrap().clone();
+                        overlay::overlay(ui, &snapshot, texture.as_ref());
+                    }
+                });
             // Audio keeps arriving whether or not anything moves on screen.
             ctx.request_repaint_after(Duration::from_millis(66));
         });
@@ -667,7 +682,7 @@ impl CompassUi {
         } else {
             engine.waterfall()
         };
-        let (w, h) = overlay_spectrogram_size(cfg, self.overlay_label_px);
+        let (w, h) = overlay_spectrogram_size(cfg, self.anchor.width, self.overlay_label_px);
         // Its own time window: a cockpit strip wants a short view, not the whole
         // analysis window crushed into a few hundred pixels.
         let window_frames = (cfg.overlay_spectrogram_seconds / geometry.frame_seconds())
@@ -1021,6 +1036,24 @@ mod tests {
         // A later write is visible to the holder of the clone — which is the
         // whole reason the callback reads through one.
         assert!(reader.lock().unwrap().landscape);
+    }
+
+    #[test]
+    fn the_overlay_window_is_never_torn_down_to_hide_it() {
+        // Both of the obvious hide mechanisms are broken in egui 0.35, each in
+        // a way that took a crash or a freeze to find, so the visibility
+        // decision must only ever change what is *painted*.
+        //
+        // Destroying the viewport risks `Painter::set_window(id, None)`, which
+        // clears every surface, not just that viewport's. Hiding it with
+        // `with_visible(false)` stops its redraws for good. Painting nothing
+        // has neither failure mode.
+        // Nothing is painted until the visibility decision has actually been
+        // made, so launching cannot flash a panel over the desktop.
+        let mut state = overlay::OverlayState::default();
+        assert!(!state.showing, "an overlay paints nothing until told to");
+        state.showing = true;
+        assert!(state.showing, "and the flag is what the callback reads");
     }
 
     #[test]

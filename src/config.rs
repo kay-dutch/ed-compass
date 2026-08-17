@@ -26,13 +26,18 @@ impl IgnoreBand {
 ///
 /// 2: indicators moved to a left-hand column with the spectrogram filling the
 ///    full height, anchored to the game window's top-left corner.
+/// 6: fitted between SrvSurvey's top-left and top-centre plotters by default,
+///    which changes both the width and the offset.
+/// 5: direction finding on by default, so the bearing rose is there from the
+///    first launch. Measured at 0.04 percentage points of one core and 27 MB
+///    for a stereo endpoint — too little to make anyone opt in.
 /// 3: twice as wide, still flush left. Also rescues every file stamped with
 ///    revision 2 while carrying revision-1 geometry: the missing-key default
 ///    used to *be* the current revision, so real pre-revision configs were
 ///    marked migrated without being touched.
 /// 4: shifted 220 px right — flush in the corner covered Elite's own info
 ///    icons. Size unchanged.
-pub const OVERLAY_LAYOUT_REVISION: u32 = 4;
+pub const OVERLAY_LAYOUT_REVISION: u32 = 6;
 
 /// Whether files can actually be created in a directory.
 ///
@@ -153,6 +158,13 @@ pub struct Config {
     pub overlay_x_fraction: f32,
     /// Overlay top edge as a fraction of the game window height.
     pub overlay_y_fraction: f32,
+    /// Fit the overlay into the gap SrvSurvey's top plotters leave free,
+    /// deriving its position and width from the game window each time rather
+    /// than using `overlay_x_offset_px` and `overlay_width`.
+    ///
+    /// Harmless without SrvSurvey installed: the band it targets is empty
+    /// screen either way, just narrower than the whole top edge.
+    pub overlay_fit_between_plotters: bool,
     /// Pixels added rightward after the fractional position, so the overlay
     /// clears Elite's top-left info icons without covering them. Absolute
     /// rather than fractional because the icons hug the corner at every
@@ -278,7 +290,10 @@ impl Default for Config {
             analysis_update_hz: 10.0,
             health_window_seconds: 2.0,
 
-            direction_finding: false,
+            // On by default: the measurement says a stereo endpoint pays 0.04
+            // percentage points of one core and 27 MB for it, which is not a
+            // price worth making anyone opt into.
+            direction_finding: true,
             detect_keying: true,
             detect_structure: true,
             // Raised from 0.85 after measurement: ship ambience at Eratosthenes
@@ -301,6 +316,7 @@ impl Default for Config {
             // lives there, and it leaves the centre and right panels clear.
             overlay_x_fraction: 0.0,
             overlay_y_fraction: 0.0,
+            overlay_fit_between_plotters: true,
             overlay_x_offset_px: 220.0,
             overlay_width: 880.0,
             overlay_height: 104.0,
@@ -420,6 +436,11 @@ impl Config {
         self.overlay_x_fraction = d.overlay_x_fraction;
         self.overlay_y_fraction = d.overlay_y_fraction;
         self.overlay_x_offset_px = d.overlay_x_offset_px;
+        // Not geometry, but it decides whether the overlay has a bearing rose
+        // at all — and a value of `false` in an existing file came from the old
+        // default, not from anyone choosing it.
+        self.direction_finding = d.direction_finding;
+        self.overlay_fit_between_plotters = d.overlay_fit_between_plotters;
         self.overlay_width = d.overlay_width;
         self.overlay_height = d.overlay_height;
         self.overlay_layout_revision = OVERLAY_LAYOUT_REVISION;
@@ -632,6 +653,70 @@ mod tests {
         assert!(cfg.validate().is_err());
     }
 
+    /// The fallback that lets an installed copy save its settings at all.
+    ///
+    /// Mutation testing found this entirely untested: `user_data_dir` could
+    /// return `None`, or an empty path, and nothing noticed — while this is
+    /// exactly the path a Program Files install depends on.
+    #[test]
+    fn there_is_a_writable_place_for_settings_off_the_program_directory() {
+        let dir = user_data_dir().expect("a per-user data directory must exist");
+
+        assert!(
+            dir.as_os_str().len() > 1,
+            "an empty path is not a directory: {dir:?}"
+        );
+        assert!(
+            dir.is_absolute(),
+            "must not depend on the working directory"
+        );
+        assert!(
+            dir.ends_with("ED Compass"),
+            "settings belong in a folder of our own, got {dir:?}"
+        );
+        assert!(dir.exists(), "it must be created, not merely named");
+        assert!(
+            is_writable(&dir),
+            "the whole point of the fallback is that this one can be written to"
+        );
+    }
+
+    /// Export height is corrected so a cropped band does not steepen slopes.
+    ///
+    /// The guard against degenerate inputs had no test: turning each `||` into
+    /// `&&` left the suite green, so nothing checked that a nonsensical band
+    /// falls back instead of producing a garbage height.
+    #[test]
+    fn a_degenerate_band_falls_back_instead_of_scaling() {
+        let mut cfg = Config::default();
+        cfg.export_height = 1600;
+
+        // The real case: our band is narrower than the published one, so the
+        // height shrinks in proportion rather than magnifying every slope.
+        let matched = cfg.matched_export_height(20.0, 22_050.0);
+        assert!(
+            matched < cfg.export_height && matched >= 64,
+            "expected a reduced but usable height, got {matched}"
+        );
+
+        // Each degenerate reference must fall back to the configured height.
+        for (lo, hi) in [(0.0, 22_050.0), (20.0, 0.0), (22_050.0, 20.0), (20.0, 20.0)] {
+            assert_eq!(
+                cfg.matched_export_height(lo, hi),
+                cfg.export_height,
+                "reference {lo}..{hi} should fall back"
+            );
+        }
+
+        // And a degenerate configured band does too.
+        let mut broken = Config::default();
+        broken.spectrogram_min_hz = 0.0;
+        assert_eq!(
+            broken.matched_export_height(20.0, 22_050.0),
+            broken.export_height
+        );
+    }
+
     #[test]
     fn writability_is_established_by_trying_it() {
         let dir = std::env::temp_dir();
@@ -659,6 +744,156 @@ mod tests {
         let p = Config::default_path();
         assert_eq!(p.file_name().unwrap(), "config.toml");
         assert!(p.parent().is_some(), "it must live in a directory: {p:?}");
+    }
+
+    /// Settings the layout migration resets when the revision is bumped.
+    ///
+    /// Changing the *default* of one of these reaches people who already have a
+    /// config; changing the default of anything else does not.
+    const MIGRATED: &[&str] = &[
+        "overlay_x_fraction",
+        "overlay_y_fraction",
+        "overlay_x_offset_px",
+        "overlay_width",
+        "overlay_height",
+        "overlay_fit_between_plotters",
+        "direction_finding",
+        "overlay_layout_revision",
+    ];
+
+    /// Settings that belong to whoever edited the file. Their defaults may
+    /// change, but an existing config keeps whatever it says.
+    const USER_OWNED: &[&str] = &[
+        "device",
+        "pcm_ring_seconds",
+        "fft_size",
+        "hop",
+        "waterfall_seconds",
+        "spectrogram_min_hz",
+        "spectrogram_max_hz",
+        "detect_min_hz",
+        "detect_max_hz",
+        "spectrogram_median_subtract",
+        "spectrogram_show_excess",
+        "longterm_fps",
+        "longterm_bands",
+        "histogram_bins",
+        "analysis_update_hz",
+        "health_window_seconds",
+        "detect_keying",
+        "detect_structure",
+        "keying_threshold",
+        "keying_min_hz",
+        "structure_threshold",
+        "detector_capture_seconds",
+        "overlay_enabled",
+        "overlay_spectrogram",
+        "overlay_spectrogram_seconds",
+        "export_dir",
+        "export_width",
+        "export_match_published_aspect",
+        "export_height",
+        "novelty_threshold_db",
+        "background_time_constant_seconds",
+        "background_max_freeze_seconds",
+        "min_event_seconds",
+        "event_gap_tolerance_seconds",
+        "trigger_score",
+        "ignore_bands",
+        "capture_pre_roll_seconds",
+        "capture_post_roll_seconds",
+        "capture_cooldown_seconds",
+        "max_captures_per_hour",
+        "disk_budget_mb",
+        "protect_best_captures",
+        "export_budget_mb",
+        "capture_format",
+        "journal_enabled",
+        "journal_path",
+    ];
+
+    /// Every setting must be classified, so adding one forces the question.
+    ///
+    /// This exists because the same mistake shipped twice: a default was
+    /// corrected, and nobody who already had a config ever saw the correction,
+    /// because only a revision bump reaches an existing file. The compiler
+    /// cannot see that class of bug -- the code is perfectly valid -- so the
+    /// decision is made explicit here instead.
+    #[test]
+    fn every_setting_says_whether_a_default_change_reaches_existing_configs() {
+        // Optional settings vanish from the serialized form when they are
+        // `None`, so populate them first — otherwise the classification would
+        // silently skip exactly the settings nobody remembers to think about.
+        let mut probe = Config::default();
+        probe.export_dir = Some("exports".into());
+        let text = toml::to_string_pretty(&probe).expect("serialize");
+        let table: toml::Table = text.parse().expect("parse");
+
+        for key in table.keys() {
+            let migrated = MIGRATED.contains(&key.as_str());
+            let user_owned = USER_OWNED.contains(&key.as_str());
+            assert!(
+                migrated || user_owned,
+                "`{key}` is a new setting and is not classified. Add it to \
+                 MIGRATED if changing its default must reach people who already \
+                 have a config.toml (and bump OVERLAY_LAYOUT_REVISION when you \
+                 change it), or to USER_OWNED if their saved value must win."
+            );
+            assert!(
+                !(migrated && user_owned),
+                "`{key}` cannot be both migrated and user-owned"
+            );
+        }
+
+        // And the lists must not rot: every name in them must still exist.
+        for key in MIGRATED.iter().chain(USER_OWNED) {
+            assert!(
+                table.contains_key(*key),
+                "`{key}` is classified but is no longer a setting -- remove it"
+            );
+        }
+    }
+
+    /// The migration must actually restore everything it claims to.
+    ///
+    /// Listing a field in `MIGRATED` is a promise; this checks the promise is
+    /// kept, so a field cannot be added to the list and forgotten in the code.
+    #[test]
+    fn everything_listed_as_migrated_really_is_restored() {
+        let defaults = Config::default();
+        let mut cfg = Config::default();
+
+        // Move every migrated setting away from its default.
+        cfg.overlay_x_fraction = 0.87;
+        cfg.overlay_y_fraction = 0.43;
+        cfg.overlay_x_offset_px = 999.0;
+        cfg.overlay_width = 123.0;
+        cfg.overlay_height = 45.0;
+        cfg.overlay_fit_between_plotters = !defaults.overlay_fit_between_plotters;
+        cfg.direction_finding = !defaults.direction_finding;
+        // A file written before this revision.
+        cfg.overlay_layout_revision = 0;
+        // And one that is not migrated, to prove the migration is surgical.
+        cfg.keying_threshold = 0.123;
+
+        cfg.migrate_overlay_layout();
+
+        assert_eq!(cfg.overlay_x_fraction, defaults.overlay_x_fraction);
+        assert_eq!(cfg.overlay_y_fraction, defaults.overlay_y_fraction);
+        assert_eq!(cfg.overlay_x_offset_px, defaults.overlay_x_offset_px);
+        assert_eq!(cfg.overlay_width, defaults.overlay_width);
+        assert_eq!(cfg.overlay_height, defaults.overlay_height);
+        assert_eq!(
+            cfg.overlay_fit_between_plotters,
+            defaults.overlay_fit_between_plotters
+        );
+        assert_eq!(cfg.direction_finding, defaults.direction_finding);
+        assert_eq!(cfg.overlay_layout_revision, OVERLAY_LAYOUT_REVISION);
+
+        assert_eq!(
+            cfg.keying_threshold, 0.123,
+            "a user-owned setting must survive the migration untouched"
+        );
     }
 
     #[test]

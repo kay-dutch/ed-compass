@@ -1036,10 +1036,12 @@ mod tests {
 
     #[test]
     fn the_fast_path_keeps_one_transform_and_a_mono_ring() {
-        // The default. On a 7.1 endpoint this is the difference between eight
+        // On a 7.1 endpoint the fast path is the difference between eight
         // transforms per frame and one, and between 220 MB of ring and 27 MB.
-        let cfg = fast_config();
-        assert!(!cfg.direction_finding, "direction finding is opt-in");
+        // Pinned explicitly rather than inherited: direction finding is on by
+        // default now, and this test is about what happens when it is not.
+        let mut cfg = fast_config();
+        cfg.direction_finding = false;
 
         let engine = AnalysisEngine::new(cfg, format(8, MASK_7_1));
         assert!(!engine.direction_finding());
@@ -1075,7 +1077,8 @@ mod tests {
         cfg.pcm_ring_seconds = 2.0;
         cfg.background_time_constant_seconds = 20.0;
         cfg.background_max_freeze_seconds = 600.0;
-        assert!(!cfg.direction_finding);
+        // This test covers the mono fast path specifically.
+        cfg.direction_finding = false;
 
         let mut engine = AnalysisEngine::new(cfg, f.clone());
         let mut source = SyntheticSource::new(TestSignal::Landscape, f, -55.0);

@@ -32,6 +32,13 @@ fn main() {
     let format = StreamFormat::new(rate, channels, mask, SampleFormat::F32);
     let mut cfg = Config::default();
     cfg.analysis_update_hz = snapshot_hz;
+    // Fourth positional argument, so the cost of direction finding can be
+    // measured rather than argued about.
+    cfg.direction_finding = args
+        .get(4)
+        .map(|v| v == "df" || v == "true" || v == "1")
+        .unwrap_or(cfg.direction_finding);
+    println!("direction finding: {}", cfg.direction_finding);
 
     println!("stream:  {}", format.describe());
     println!("audio:   {seconds:.0} s");

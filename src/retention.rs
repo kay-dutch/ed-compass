@@ -493,6 +493,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The two readout helpers feed the disk bar and the observation count.
+    ///
+    /// Both were written without tests, and mutation testing proved it: making
+    /// `extension_bytes` return 0, or 1, or count the *wrong* extension, and
+    /// making `record_count` do the same, left the whole suite green.
+    #[test]
+    fn the_disk_readout_counts_the_right_files() {
+        let dir = std::env::temp_dir().join(format!("ed-compass-readout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        std::fs::write(dir.join("a.png"), vec![0u8; 1000]).unwrap();
+        std::fs::write(dir.join("b.png"), vec![0u8; 2500]).unwrap();
+        // Other extensions must not be counted as exports.
+        std::fs::write(dir.join("c.flac"), vec![0u8; 9999]).unwrap();
+        std::fs::write(dir.join("c.json"), b"{}").unwrap();
+        std::fs::write(dir.join("d.json"), b"{}").unwrap();
+
+        assert_eq!(
+            extension_bytes(&dir, "png"),
+            3500,
+            "only the PNGs, and their real sizes"
+        );
+        assert_eq!(extension_bytes(&dir, "flac"), 9999);
+        assert_eq!(extension_bytes(&dir, "wav"), 0, "nothing of that kind here");
+
+        // Sidecars are the observations, and outlive their audio.
+        assert_eq!(record_count(&dir), 2, "two JSON records");
+
+        // A directory that does not exist is empty, not a panic.
+        let missing = dir.join("no-such-place");
+        assert_eq!(extension_bytes(&missing, "png"), 0);
+        assert_eq!(record_count(&missing), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn exports_are_trimmed_oldest_first() {
         let dir = std::env::temp_dir().join(format!("ed-compass-exports-{}", std::process::id()));

@@ -94,6 +94,54 @@ impl OverlayAnchor {
     }
 }
 
+/// The horizontal band that SrvSurvey's top-edge plotters leave free.
+///
+/// Numbers taken from SrvSurvey's own source rather than measured off a
+/// screenshot. Its `plotters.json` anchors overlays as
+/// `"<left|center|right>:<±px>, <top|middle|bottom>:<±px>"`, and the plotters
+/// that sit along the top are:
+///
+/// * `left:8` — PlotBodyInfo (320 wide), PlotFSSInfo (300), PlotGalMap (240).
+///   The widest reaches `8 + 320 = 328`.
+/// * `center:0` — PlotJumpInfo (600 wide), PlotGuardianStatus (500),
+///   PlotBioStatus (480), PlotFSS (420). The widest spans
+///   `centre ± 300`.
+///
+/// So the free band runs from 328 to `centre - 300`, less a margin at each end.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlotterGap {
+    /// Right edge of the widest top-left plotter.
+    pub left_edge: f32,
+    /// Width of the widest centred top plotter.
+    pub centre_width: f32,
+    /// Clearance left on each side, so the panels do not touch.
+    pub margin: f32,
+    /// Below this the band is not worth using and the configured width wins.
+    pub min_width: f32,
+}
+
+impl Default for PlotterGap {
+    fn default() -> Self {
+        Self {
+            left_edge: 328.0,
+            centre_width: 600.0,
+            margin: 8.0,
+            min_width: 260.0,
+        }
+    }
+}
+
+impl PlotterGap {
+    /// Where the free band starts and how wide it is, for a game window of this
+    /// width. `None` when the band is too narrow to be worth having.
+    pub fn band(&self, game_width: f32) -> Option<(f32, f32)> {
+        let left = self.left_edge + self.margin;
+        let right = game_width / 2.0 - self.centre_width / 2.0 - self.margin;
+        let width = right - left;
+        (width >= self.min_width).then_some((left, width))
+    }
+}
+
 /// The game's window, and whether the player is actually looking at it.
 ///
 /// Focus matters as much as position: an overlay that stays up while you are in
@@ -114,7 +162,7 @@ mod imp {
     use super::Rect;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, GetForegroundWindow, GetWindowRect, IsWindowVisible,
+        FindWindowW, GetForegroundWindow, GetWindowRect, IsIconic, IsWindowVisible,
     };
     use windows::core::PCWSTR;
 
@@ -152,6 +200,14 @@ mod imp {
             if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
                 continue;
             }
+            // A minimized game is not a game window. Windows still reports a
+            // rectangle for it — often a stale or off-screen one — so without
+            // this the overlay would appear over the desktop the moment our own
+            // window took focus. SrvSurvey makes the same check and returns an
+            // empty rectangle for a minimized Elite.
+            if unsafe { IsIconic(hwnd) }.as_bool() {
+                continue;
+            }
             if let Some(rect) = rect_of(hwnd)
                 && rect.is_usable()
             {
@@ -182,6 +238,8 @@ pub use imp::find_game_window;
 pub struct OverlayPlacement {
     /// Top-left corner in screen pixels.
     pub position: (f32, f32),
+    /// Width of the game window, so the overlay can be fitted to it.
+    pub game_width: f32,
     /// Whether the game window was found at all.
     pub game_found: bool,
     /// Whether the game currently has focus.
@@ -196,6 +254,7 @@ pub fn overlay_placement(anchor: OverlayAnchor) -> OverlayPlacement {
     match find_game_window(&GAME_WINDOW_TITLES) {
         Some(game) => OverlayPlacement {
             position: anchor.position_in(game.rect),
+            game_width: game.rect.width() as f32,
             game_found: true,
             game_focused: game.focused,
         },
@@ -208,6 +267,7 @@ pub fn overlay_placement(anchor: OverlayAnchor) -> OverlayPlacement {
             };
             OverlayPlacement {
                 position: anchor.position_in(fallback),
+                game_width: fallback.width() as f32,
                 game_found: false,
                 game_focused: false,
             }
@@ -261,6 +321,27 @@ mod tests {
             bottom: 1280,
         };
         assert_eq!(a.position_in(moved), (860.0, 200.0));
+    }
+
+    #[test]
+    fn the_free_band_matches_srvsurvey_s_own_layout() {
+        let gap = PlotterGap::default();
+
+        // 2560x1440: top-left plotters end at 328, the widest centred one
+        // starts at 1280 - 300 = 980. Minus 8 px of clearance each side.
+        let (x, w) = gap.band(2560.0).expect("a 2560-wide window has room");
+        assert_eq!(x, 336.0);
+        assert_eq!(w, 636.0);
+        assert!(x + w <= 980.0, "must not reach PlotJumpInfo at 980");
+        assert!(x >= 328.0, "must not reach PlotBodyInfo ending at 328");
+
+        // 1920 is tighter but still usable.
+        let (x, w) = gap.band(1920.0).expect("1920 still has room");
+        assert_eq!(x, 336.0);
+        assert!((x + w) <= 960.0 - 300.0);
+
+        // A small window has no useful band at all.
+        assert_eq!(gap.band(1280.0), None);
     }
 
     #[test]

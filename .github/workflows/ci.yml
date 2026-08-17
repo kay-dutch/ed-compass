@@ -16,7 +16,7 @@ jobs:
     # a missing system library rather than a real fault.
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -28,3 +28,12 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --locked
+
+      # The unit tests never start the real pipeline end to end. This does:
+      # 60 s of synthetic audio through capture, analysis, detection and the
+      # capture writer, in the same process arrangement the app uses. It cannot
+      # catch anything in the windowed render path — that is what the crash log
+      # is for — but every panic below the UI shows up here instead of in the
+      # cockpit.
+      - name: Soak the pipeline headless
+        run: cargo run --release --locked -- --headless --duration 60 --test-landscape
