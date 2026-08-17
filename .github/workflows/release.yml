@@ -62,7 +62,7 @@ jobs:
         run: |
           $stage = "dist\portable"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item target\release\ed-compass.exe, README.md, LICENSE $stage
+          Copy-Item target\release\ed-compass.exe, README.md, CHANGELOG.md, LICENSE $stage
           Compress-Archive -Path "$stage\*" -DestinationPath "dist\ed-compass-${{ steps.version.outputs.version }}-win64.zip" -Force
           Remove-Item -Recurse -Force $stage
 

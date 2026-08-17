@@ -36,7 +36,7 @@ flying you'd normally use the cockpit overlay instead.</sub>
 ## Install
 
 **[⬇ Download the latest release](../../releases)** — run
-`ED-Compass-Setup-0.1.0.exe` and you're done. No administrator rights, nothing else to
+`ED-Compass-Setup-0.2.0.exe` and you're done. No administrator rights, nothing else to
 install.
 
 Windows will say *"unknown publisher"*. Click **More info → Run anyway**. That
@@ -119,6 +119,7 @@ Settings and recordings stay in that folder.
 
 - **[Technical reference](docs/reference.md)** — how it works, how it was
   validated, every setting, and what it deliberately does not do.
+- **[Changelog](CHANGELOG.md)** — what changed in each release, and why.
 - **[The Landscape Signal](https://canonn.science/codex/cartographics/the-landscape-signal/)** —
   Canonn's write-up of the thing this was built to find.
 - Bugs and ideas: [open an issue](../../issues).

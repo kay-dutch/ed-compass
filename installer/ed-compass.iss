@@ -56,6 +56,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "..\target\release\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md";                   DestDir: "{app}"; Flags: ignoreversion isreadme
+Source: "..\CHANGELOG.md";                DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE";                     DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
