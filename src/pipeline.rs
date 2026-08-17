@@ -190,7 +190,18 @@ pub struct AnalysisEngine {
     event_cross: Complex32,
     event_frames: usize,
     /// Live bearing, updated every frame that has any activity.
+    /// Bearing of the material that triggered the current event. This is what a
+    /// detection records, so it must stay scoped to the event.
+    event_direction: DirectionEstimate,
+    /// Bearing of whatever is loudest right now, updated every frame regardless
+    /// of whether anything is above the detection threshold. This is what the
+    /// compass and the overlay's rose show.
     live_direction: DirectionEstimate,
+    /// Smoothed per-channel power and L/R cross-spectrum feeding the live
+    /// bearing. Smoothed as *powers*, not as an angle: angles wrap, and
+    /// averaging across the wrap point produces a bearing pointing at nothing.
+    live_powers: Vec<f64>,
+    live_cross: Complex32,
 
     deinterleaved: Vec<Vec<f32>>,
     frames_analyzed: u64,
@@ -291,7 +302,10 @@ impl AnalysisEngine {
             event_powers: vec![0.0; streams],
             event_cross: Complex32::new(0.0, 0.0),
             event_frames: 0,
+            event_direction: DirectionEstimate::insufficient(),
             live_direction: DirectionEstimate::insufficient(),
+            live_powers: vec![0.0; streams],
+            live_cross: Complex32::new(0.0, 0.0),
             deinterleaved: vec![Vec::new(); if direction_finding { channels } else { 0 }],
             frames_analyzed: 0,
             gap_count: 0,
@@ -535,6 +549,7 @@ impl AnalysisEngine {
             }
             if self.direction_finding {
                 self.accumulate_direction();
+                self.update_live_direction();
             }
             self.frames_analyzed += 1;
 
@@ -705,6 +720,54 @@ impl AnalysisEngine {
         &self.structure
     }
 
+    /// Track the bearing of whatever is playing, detection or not.
+    ///
+    /// [`Self::accumulate_direction`] only looks at bins that clear
+    /// `novelty_threshold_db`, because a *detection* must be attributed to the
+    /// material that caused it. Nothing clears that bar during ordinary
+    /// listening, so a compass fed from it sits dead — which is exactly how it
+    /// looked in the cockpit, indistinguishable from a broken instrument.
+    ///
+    /// This one takes the whole detection band every frame, and smooths the
+    /// powers rather than the angle: bearings wrap at ±180°, and averaging
+    /// across the wrap point yields a needle pointing at nothing.
+    fn update_live_direction(&mut self) {
+        let channels = self.format.channels;
+        if channels < 2 {
+            return;
+        }
+        let bins = self.geometry.bins();
+        let lo = self.cfg.detect_min_hz;
+        let hi = self.cfg.detect_max_hz;
+
+        // One frame's worth of energy across the band we care about.
+        let mut powers = vec![0.0f64; channels];
+        let mut cross = Complex32::new(0.0, 0.0);
+        for bin in 0..bins {
+            let hz = self.geometry.bin_hz(bin);
+            if hz < lo || hz > hi {
+                continue;
+            }
+            for (c, power) in powers.iter_mut().enumerate() {
+                *power += self.channel_powers[c][bin] as f64;
+            }
+            cross += self.spectra[0][bin] * self.spectra[1][bin].conj();
+        }
+
+        // A second or so of memory, so the needle settles instead of twitching
+        // at the frame rate.
+        const SMOOTHING: f64 = 0.05;
+        for (live, now) in self.live_powers.iter_mut().zip(&powers) {
+            *live += (now - *live) * SMOOTHING;
+        }
+        let a = SMOOTHING as f32;
+        self.live_cross = self.live_cross * (1.0 - a) + cross * a;
+
+        let smoothed: Vec<f32> = self.live_powers.iter().map(|p| *p as f32).collect();
+        let layout = self.format.layout();
+        self.live_direction = direction::estimate(&smoothed, &layout, Some(self.live_cross));
+    }
+
     /// Accumulate per-channel power over the bins currently above threshold.
     fn accumulate_direction(&mut self) {
         let threshold = self.cfg.novelty_threshold_db;
@@ -737,7 +800,7 @@ impl AnalysisEngine {
             } else {
                 None
             };
-            self.live_direction = direction::estimate(&powers, &layout, cross);
+            self.event_direction = direction::estimate(&powers, &layout, cross);
         }
     }
 
@@ -746,7 +809,7 @@ impl AnalysisEngine {
         let start_sample = event.start_frame * hop;
         let end_sample = event.end_frame * hop + self.cfg.fft_size as u64;
         Detection {
-            direction: self.live_direction,
+            direction: self.event_direction,
             spans_gap: self.last_gap_end_sample > start_sample
                 && self.last_gap_end_sample <= end_sample,
             start_sample,
@@ -1031,6 +1094,63 @@ mod tests {
             "bearing {} vs target {target} (confidence {})",
             best.direction.azimuth_deg,
             best.direction.confidence
+        );
+    }
+
+    /// The compass must read something while merely listening.
+    ///
+    /// The live bearing used to come from an accumulator that only ran for bins
+    /// clearing `novelty_threshold_db`, because a *detection* has to be
+    /// attributed to the material that caused it. Nothing clears that bar in
+    /// ordinary listening, so the needle sat at `insufficient()` forever — a
+    /// dead instrument, indistinguishable from a broken one, which is exactly
+    /// how it looked in the cockpit.
+    #[test]
+    fn the_live_bearing_tracks_a_source_without_any_detection() {
+        let f = format(2, MASK_STEREO);
+        let mut cfg = fast_config();
+        cfg.direction_finding = true;
+        let mut engine = AnalysisEngine::new(cfg, f.clone());
+
+        // A steady tone off to the left. Steady is the point: it never rises
+        // far enough above its own background to open an event.
+        let mut source = SyntheticSource::new(TestSignal::Sine { hz: 900.0 }, f, -25.0);
+        let detections = feed(&mut engine, &mut source, 4.0);
+
+        let d = engine.snapshot().direction;
+        assert!(
+            d.is_usable(),
+            "the compass must have an answer while just listening, got {d:?}"
+        );
+        assert!(
+            d.azimuth_deg < -3.0,
+            "a source on the left must read left, got {:+.1}°",
+            d.azimuth_deg
+        );
+        assert!(d.confidence > 0.5, "a cleanly panned tone is not ambiguous");
+
+        // And this is true whether or not anything was detected — the point is
+        // that the bearing does not depend on it.
+        let _ = detections;
+    }
+
+    /// A centred source reads centred, rather than reading as nothing.
+    #[test]
+    fn a_centred_source_is_measured_not_dropped() {
+        let f = format(2, MASK_STEREO);
+        let mut cfg = fast_config();
+        cfg.direction_finding = true;
+        let mut engine = AnalysisEngine::new(cfg, f.clone());
+
+        let mut source = SyntheticSource::new(TestSignal::Sine { hz: 900.0 }, f, 0.0);
+        feed(&mut engine, &mut source, 4.0);
+
+        let d = engine.snapshot().direction;
+        assert!(d.is_usable(), "centred is a measurement, not a failure");
+        assert!(
+            d.azimuth_deg.abs() < 3.0,
+            "a centred source must read centred, got {:+.1}°",
+            d.azimuth_deg
         );
     }
 

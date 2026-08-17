@@ -40,16 +40,26 @@ impl std::fmt::Display for ClaimError {
 }
 
 /// Name of the mutex. Session-scoped, so two different users may each run one.
-#[cfg(windows)]
-const LOCK_NAME: &str = "Local\\ed-compass-single-instance";
+pub const LOCK_NAME: &str = "Local\\ed-compass-single-instance";
 
-#[cfg(windows)]
+/// Claim the running-instance lock.
 pub fn claim() -> Result<InstanceLock, ClaimError> {
+    claim_named(LOCK_NAME)
+}
+
+/// Claim a named lock.
+///
+/// The name is a parameter so the tests can use one of their own. Sharing
+/// [`LOCK_NAME`] with the real application meant the whole suite failed
+/// whenever ED Compass happened to be running — the first claim in each test
+/// lost to the live process — which on this project is most of the time.
+#[cfg(windows)]
+pub fn claim_named(name: &str) -> Result<InstanceLock, ClaimError> {
     use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
     use windows::core::PCWSTR;
 
-    let wide: Vec<u16> = LOCK_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     let handle = unsafe { CreateMutexW(None, true, PCWSTR(wide.as_ptr())) }
         .map_err(|e| ClaimError::Unavailable(e.to_string()))?;
 
@@ -80,7 +90,7 @@ impl Drop for InstanceLock {
 }
 
 #[cfg(not(windows))]
-pub fn claim() -> Result<InstanceLock, ClaimError> {
+pub fn claim_named(_name: &str) -> Result<InstanceLock, ClaimError> {
     // Only Windows can run the live capture, so the collision this guards
     // against cannot happen elsewhere.
     Ok(InstanceLock {})
@@ -90,16 +100,33 @@ pub fn claim() -> Result<InstanceLock, ClaimError> {
 mod tests {
     use super::*;
 
+    /// A lock name unique to this test process.
+    ///
+    /// Never [`LOCK_NAME`]: that one belongs to the running application, and
+    /// borrowing it made the suite fail whenever ED Compass was open.
+    fn test_lock(tag: &str) -> String {
+        format!("Local\\ed-compass-test-{}-{tag}", std::process::id())
+    }
+
     #[test]
     fn the_first_claim_succeeds() {
-        let lock = claim();
+        let lock = claim_named(&test_lock("first"));
         assert!(lock.is_ok(), "a first claim must succeed: {lock:?}");
     }
 
     #[test]
+    fn the_application_lock_is_not_the_one_the_tests_use() {
+        assert!(
+            !test_lock("x").contains("single-instance"),
+            "tests must not claim the name the running application holds"
+        );
+    }
+
+    #[test]
     fn a_second_claim_is_refused_while_the_first_is_held() {
-        let first = claim().expect("first claim");
-        let second = claim();
+        let name = test_lock("second");
+        let first = claim_named(&name).expect("first claim");
+        let second = claim_named(&name);
 
         // Compared with `matches!` rather than `assert_eq!`: on Windows the Ok
         // variant holds a raw HANDLE and is not `PartialEq`, so the equality
@@ -123,10 +150,14 @@ mod tests {
 
     #[test]
     fn releasing_allows_a_later_claim() {
+        let name = test_lock("release");
         {
-            let _held = claim().expect("claim");
+            let _held = claim_named(&name).expect("claim");
         } // released here
-        assert!(claim().is_ok(), "the lock must be reusable after release");
+        assert!(
+            claim_named(&name).is_ok(),
+            "the lock must be reusable after release"
+        );
     }
 
     #[test]
