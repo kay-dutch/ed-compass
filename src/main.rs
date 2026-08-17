@@ -63,6 +63,11 @@ struct Cli {
     #[arg(long, hide = true)]
     overlay: bool,
 
+    /// Which renderer to draw with: glow (OpenGL) or wgpu (DX12/Vulkan).
+    /// Overrides the `renderer` setting for this run.
+    #[arg(long, value_name = "NAME", value_parser = ["glow", "wgpu"])]
+    renderer: Option<String>,
+
     /// Create a Desktop shortcut, then exit.
     #[arg(long)]
     install_shortcut: bool,
@@ -606,8 +611,9 @@ fn install_crash_log() {
         let path = Config::default_path().with_file_name(format!("crash-{stamp}.log"));
         let backtrace = std::backtrace::Backtrace::force_capture();
         let report = format!(
-            "ED Compass {} crashed at {stamp}\nthread: {}\n\n{info}\n\n{backtrace}\n",
+            "ED Compass {} crashed at {stamp}\nrenderer: {}\nthread: {}\n\n{info}\n\n{backtrace}\n",
             env!("CARGO_PKG_VERSION"),
+            ed_compass::ui::active_backend(),
             std::thread::current().name().unwrap_or("unnamed"),
         );
         let _ = std::fs::write(&path, &report);
@@ -637,6 +643,7 @@ fn main() -> Result<()> {
     // --view/--compact/--overlay are accepted for old shortcuts and ignored.
     let _ = (&cli.view, cli.compact, cli.overlay);
     cfg.validate()?;
+    let cfg_renderer = cfg.renderer.clone();
     log::info!("configuration: {}", config_path.display());
 
     let capture_dir = cli.captures.clone().unwrap_or_else(|| {
@@ -665,7 +672,13 @@ fn main() -> Result<()> {
     let result = if cli.headless {
         run_headless(app, cli.duration, cli.export_png.clone())
     } else {
-        ed_compass::ui::run(app)
+        let backend = cli
+            .renderer
+            .as_deref()
+            .or(Some(cfg_renderer.as_str()))
+            .and_then(ed_compass::ui::Backend::parse)
+            .unwrap_or(ed_compass::ui::Backend::Glow);
+        ed_compass::ui::run(app, backend)
     };
 
     // An Err exit in a windowed build vanishes as silently as a panic — stderr

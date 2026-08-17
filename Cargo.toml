@@ -35,16 +35,18 @@ chrono = "0.4.45"
 clap = { version = "4.6.6", features = ["derive"] }
 claxon = "0.4.3"
 crossbeam-channel = "0.5.16"
-# The OpenGL backend, not the default wgpu one. Every crash this tool has had
-# in the field was the same wgpu validation error — a texture reported invalid
+# Both rendering backends, chosen at startup. Every crash this tool has had in
+# the field was the same wgpu validation error — a texture reported invalid
 # inside `egui_wgpu::Renderer::update_texture` — while running two viewports
-# (the control window and the in-game overlay). Four separate fixes narrowed it
-# without removing it. `glow` is a different renderer implementation of the
-# exact function that fails, and this application asks nothing of the GPU that
-# OpenGL cannot do: two 2D panels and a spectrogram bitmap.
+# (the control window and the in-game overlay). `glow` is a different
+# implementation of the function that fails, so it is the default; wgpu is kept
+# compiled in so it can be selected without a rebuild, and so a machine whose
+# OpenGL driver is too old to start glow still has something that works.
+# Carrying both costs about 6 MB of binary, which is not worth optimising away.
 eframe = { version = "0.35.0", default-features = false, features = [
     "default_fonts",
     "glow",
+    "wgpu",
     "wayland",
     "x11",
 ] }

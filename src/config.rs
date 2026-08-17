@@ -158,6 +158,12 @@ pub struct Config {
     pub overlay_x_fraction: f32,
     /// Overlay top edge as a fraction of the game window height.
     pub overlay_y_fraction: f32,
+    /// Which renderer to draw with: "glow" or "wgpu".
+    ///
+    /// Both are compiled in. glow is the default; wgpu is there so a machine
+    /// with an unusable OpenGL driver still has something that works, and so
+    /// the two can be compared without a rebuild.
+    pub renderer: String,
     /// Fit the overlay into the gap SrvSurvey's top plotters leave free,
     /// deriving its position and width from the game window each time rather
     /// than using `overlay_x_offset_px` and `overlay_width`.
@@ -316,6 +322,7 @@ impl Default for Config {
             // lives there, and it leaves the centre and right panels clear.
             overlay_x_fraction: 0.0,
             overlay_y_fraction: 0.0,
+            renderer: "glow".into(),
             overlay_fit_between_plotters: true,
             overlay_x_offset_px: 220.0,
             overlay_width: 880.0,
@@ -489,6 +496,11 @@ impl Config {
         anyhow::ensure!(
             self.health_window_seconds > 0.0,
             "health_window_seconds must be > 0"
+        );
+        anyhow::ensure!(
+            matches!(self.renderer.as_str(), "glow" | "wgpu"),
+            "renderer must be \"glow\" or \"wgpu\", got {:?}",
+            self.renderer
         );
         anyhow::ensure!(
             matches!(self.capture_format.as_str(), "flac" | "wav"),
@@ -808,6 +820,7 @@ mod tests {
         "protect_best_captures",
         "export_budget_mb",
         "capture_format",
+        "renderer",
         "journal_enabled",
         "journal_path",
     ];

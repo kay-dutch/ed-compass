@@ -22,25 +22,133 @@ use crate::game_window::{OverlayAnchor, OverlayPlacement, PlotterGap, overlay_pl
 use crate::pipeline::AnalysisSnapshot;
 
 /// Launch the window. Blocks until it closes.
-pub fn run(app: App) -> Result<()> {
+/// Which renderer to draw with.
+///
+/// Both are compiled in. `glow` is the default because every crash this tool
+/// has had in the field was a wgpu validation error in its multi-viewport
+/// texture handling; wgpu is kept so it can be selected without a rebuild, and
+/// as a fallback for a machine whose OpenGL driver is too old for glow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Glow,
+    Wgpu,
+}
+
+impl Backend {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "glow" | "opengl" | "gl" => Some(Self::Glow),
+            "wgpu" | "dx12" | "vulkan" => Some(Self::Wgpu),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Glow => "glow",
+            Self::Wgpu => "wgpu",
+        }
+    }
+
+    /// The one to try when this one will not start.
+    fn fallback(self) -> Self {
+        match self {
+            Self::Glow => Self::Wgpu,
+            Self::Wgpu => Self::Glow,
+        }
+    }
+}
+
+/// The renderer currently drawing, for the crash log to name.
+static ACTIVE_BACKEND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// What the running process is drawing with, or `"none"` before the window opens.
+pub fn active_backend() -> &'static str {
+    match ACTIVE_BACKEND.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => "glow",
+        2 => "wgpu",
+        _ => "none",
+    }
+}
+
+fn native_options(backend: Backend) -> eframe::NativeOptions {
     // One window. The in-game overlay is a second viewport that shows and
     // hides itself with the game; there is no other shape to switch to, which
     // means there is no state you have to kill the process to leave.
     let viewport = egui::ViewportBuilder::default()
         .with_title("ED Compass")
         .with_inner_size([1180.0, 860.0])
-        .with_min_inner_size([900.0, 620.0]);
+        .with_min_inner_size([900.0, 620.0])
+        // Transparency is requested here, on the *root* window, even though
+        // this window is opaque. eframe's glow backend chooses one GL config
+        // for the whole process from this flag, and a config without an alpha
+        // channel cannot host a transparent window — so the overlay, a child
+        // viewport, would come out as an opaque black rectangle over the game.
+        // `clear_color` below keeps this window itself solid.
+        .with_transparent(true);
 
-    let options = eframe::NativeOptions {
+    eframe::NativeOptions {
         viewport,
+        renderer: match backend {
+            Backend::Glow => eframe::Renderer::Glow,
+            Backend::Wgpu => eframe::Renderer::Wgpu,
+        },
         ..Default::default()
-    };
+    }
+}
 
+pub fn run(app: App, preferred: Backend) -> Result<()> {
+    // The application is handed over only when a window actually opens. If the
+    // renderer cannot start, it is still here to give to the other one.
+    let slot = std::rc::Rc::new(std::cell::RefCell::new(Some(app)));
+
+    match run_with(std::rc::Rc::clone(&slot), preferred) {
+        Ok(()) => Ok(()),
+        Err(first) if slot.borrow().is_some() => {
+            // Only a *startup* failure can be retried, and the untouched slot
+            // is how we know that is what happened: a driver too old for glow,
+            // or no working GL at all. A backend that starts and then panics
+            // hours later has already taken the process with it, and no
+            // fallback here can help — the crash log names the backend instead,
+            // so the next launch can be told to use the other one.
+            let other = preferred.fallback();
+            log::error!(
+                "the {} renderer could not start ({first:#}); trying {}",
+                preferred.as_str(),
+                other.as_str()
+            );
+            run_with(slot, other).map_err(|second| {
+                anyhow::anyhow!(
+                    "neither renderer could open a window.\n  {}: {first:#}\n  {}: {second:#}",
+                    preferred.as_str(),
+                    other.as_str()
+                )
+            })
+        }
+        Err(ran_and_failed) => Err(ran_and_failed),
+    }
+}
+
+fn run_with(slot: std::rc::Rc<std::cell::RefCell<Option<App>>>, backend: Backend) -> Result<()> {
+    ACTIVE_BACKEND.store(
+        match backend {
+            Backend::Glow => 1,
+            Backend::Wgpu => 2,
+        },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    log::info!("opening the window with the {} renderer", backend.as_str());
+
+    let options = native_options(backend);
     eframe::run_native(
         "ED Compass",
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            let app = slot
+                .borrow_mut()
+                .take()
+                .ok_or_else(|| "the application was already handed to a renderer".to_owned())?;
             Ok(Box::new(CompassUi::new(app)))
         }),
     )
@@ -96,15 +204,15 @@ fn overlay_spectrogram_size(
     )
 }
 
-/// Whether the overlay window should be visible this frame.
+/// Whether the overlay should be painted this frame.
 ///
-/// No game window, no overlay — there is nothing to annotate, and a strip
-/// floating over the desktop taught us it just flashes and worries people. With
-/// the game present it follows focus: Elite's, or our own control window's so
-/// the toggles beside it can be seen to do something rather than adjusted
-/// blind.
-fn overlay_visible(game_found: bool, game_focused: bool, own_focus: bool) -> bool {
-    game_found && (game_focused || own_focus)
+/// Elite, and only Elite. An earlier version also showed it while *our* control
+/// window had focus, so the toggles could be seen to act — but our window always
+/// has focus the instant it opens, so the overlay appeared at startup and then
+/// vanished a moment later. The overlay belongs to the cockpit; if you are not
+/// looking at the cockpit there is nothing for it to annotate.
+fn overlay_visible(game_found: bool, game_focused: bool) -> bool {
+    game_found && game_focused
 }
 
 fn overlay_viewport_id() -> egui::ViewportId {
@@ -145,6 +253,10 @@ struct CompassUi {
     pending_spectrogram: Option<egui::ColorImage>,
     /// Width the lamp column needs, measured from the text it draws.
     overlay_label_px: f32,
+    /// Whole-window alpha last applied to the overlay, once the Win32 call has
+    /// actually succeeded. `None` until then, which keeps the off-screen
+    /// fallback in play.
+    overlay_alpha: Option<u8>,
     game_found: bool,
     last_game_poll: Instant,
 
@@ -170,6 +282,7 @@ impl CompassUi {
             last_overlay_render: Instant::now() - Duration::from_secs(1),
             pending_spectrogram: None,
             overlay_label_px: 120.0,
+            overlay_alpha: None,
             game_found: false,
             last_game_poll: Instant::now() - Duration::from_secs(10),
             snapshot_interval: interval,
@@ -565,9 +678,8 @@ impl CompassUi {
         let placement = self.placement;
         self.game_found = placement.game_found;
 
-        let own_focus = ctx.input(|i| i.focused);
         let showing = self.app.overlay_enabled()
-            && overlay_visible(placement.game_found, placement.game_focused, own_focus);
+            && overlay_visible(placement.game_found, placement.game_focused);
 
         if showing {
             // Measure the column before the image is sized: the spectrogram
@@ -600,9 +712,23 @@ impl CompassUi {
                 .filter(|_| self.app.config().direction_finding);
         }
 
+        // Hidden by opacity, the way SrvSurvey hides its plotters: the window
+        // stays open, in place, and rendering, but composites to nothing.
+        //
+        // Position is the fallback, and only the fallback. If the Win32 call
+        // has not succeeded yet — the window does not exist on the first frame
+        // — the overlay is parked off-screen instead, so there is never a
+        // moment where it is both wanted-hidden and visible.
+        let hidden_by_opacity = self.overlay_alpha == Some(0);
+        let position = if showing || hidden_by_opacity {
+            placement.position
+        } else {
+            crate::game_window::PARKED_POSITION
+        };
+
         let builder = egui::ViewportBuilder::default()
-            .with_title("ED Compass overlay")
-            .with_position([placement.position.0, placement.position.1])
+            .with_title(crate::game_window::OVERLAY_WINDOW_TITLE)
+            .with_position([position.0, position.1])
             .with_inner_size([self.anchor.width, self.anchor.height])
             .with_decorations(false)
             .with_transparent(true)
@@ -615,6 +741,17 @@ impl CompassUi {
             // anything because the control window owns the process.
             .with_taskbar(false)
             .with_always_on_top();
+
+        let wanted_alpha = if showing { 255 } else { 0 };
+        if self.overlay_alpha != Some(wanted_alpha)
+            && crate::game_window::set_overlay_opacity(
+                crate::game_window::OVERLAY_WINDOW_TITLE,
+                wanted_alpha,
+            )
+        {
+            log::debug!("overlay opacity set to {wanted_alpha}");
+            self.overlay_alpha = Some(wanted_alpha);
+        }
 
         let state = Arc::clone(&self.overlay_state);
         let texture = Arc::clone(&self.overlay_texture);
@@ -917,6 +1054,18 @@ impl CompassUi {
 }
 
 impl eframe::App for CompassUi {
+    /// Paint this window solid.
+    ///
+    /// The root viewport asks for transparency so the GL config has an alpha
+    /// channel — without it the overlay, a child viewport, cannot be
+    /// transparent and appears as a black rectangle over the cockpit. That
+    /// request would otherwise let the desktop show through *this* window too,
+    /// so the clear colour is pinned opaque here.
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        let [r, g, b, _] = visuals.window_fill().to_normalized_gamma_f32();
+        [r, g, b, 1.0]
+    }
+
     /// Runs before every repaint, and also when the window is hidden — which is
     /// exactly where draining capture belongs, so a minimized window does not
     /// stall the analysis.
@@ -987,39 +1136,48 @@ mod tests {
 
     #[test]
     fn the_overlay_follows_the_game_s_focus() {
-        assert!(overlay_visible(true, true, false), "Elite in front: show");
+        assert!(overlay_visible(true, true), "Elite in front: show");
         assert!(
-            !overlay_visible(true, false, false),
+            !overlay_visible(true, false),
             "Alt-Tabbed away: the overlay must go with it, not float over the browser"
         );
+    }
+
+    #[test]
+    fn it_starts_hidden_and_is_revealed_only_by_the_game() {
+        // At launch our own control window has focus and Elite does not. An
+        // earlier version treated our focus as reason enough to show, so the
+        // overlay appeared for a moment on every start and then disappeared.
         assert!(
-            overlay_visible(true, false, true),
-            "our own window in front: show, so the toggles have a visible effect"
+            !overlay_visible(true, false),
+            "our window focused, Elite not: stay hidden"
         );
+        assert!(
+            !overlay_visible(false, false),
+            "no game at all: stay hidden"
+        );
+        // Only the game brings it out.
+        assert!(overlay_visible(true, true));
     }
 
     #[test]
     fn no_game_window_means_no_overlay_at_all() {
         // Regression: the overlay used to appear over the bare desktop whenever
         // the control panel had focus, flashing as it fought itself for focus.
-        for own in [false, true] {
-            assert!(!overlay_visible(false, false, own), "own_focus={own}");
-        }
+        assert!(!overlay_visible(false, false));
+        assert!(
+            !overlay_visible(false, true),
+            "a focused window we cannot find is not the game"
+        );
     }
 
     #[test]
     fn visibility_is_stable_while_the_game_stays_focused() {
-        // The window is created and destroyed by this decision, so any flapping
-        // here is flashing on screen. Focus held steady must give a steady
-        // answer, whatever else changes around it.
+        // Flapping here is flicker on screen. Focus held steady must give a
+        // steady answer, whatever else changes around it.
         for _ in 0..10 {
-            assert!(overlay_visible(true, true, false));
+            assert!(overlay_visible(true, true));
         }
-        // And the answer depends on nothing but its three inputs.
-        assert_eq!(
-            overlay_visible(true, true, false),
-            overlay_visible(true, true, false)
-        );
     }
 
     #[test]

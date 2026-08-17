@@ -94,6 +94,21 @@ impl OverlayAnchor {
     }
 }
 
+/// Where the overlay waits when it should not be seen.
+///
+/// Invisibility by geometry, deliberately. Three cleverer mechanisms each
+/// failed in their own way: destroying the window crashed the renderer (egui's
+/// `Painter::set_window(id, None)` clears *every* surface), hiding it with
+/// `with_visible(false)` froze it for good (a hidden window gets no redraws),
+/// and painting nothing depended on the window being transparent — which
+/// silently stopped being true when the rendering backend changed.
+///
+/// A window parked here is off every real desktop. Windows accepts positions
+/// well outside the virtual screen, and 32000 is inside the 16-bit range the
+/// window manager works in while being far beyond any monitor arrangement.
+/// Nothing about this can be broken by a driver, a compositor or a backend.
+pub const PARKED_POSITION: (f32, f32) = (32_000.0, 32_000.0);
+
 /// The horizontal band that SrvSurvey's top-edge plotters leave free.
 ///
 /// Numbers taken from SrvSurvey's own source rather than measured off a
@@ -170,6 +185,10 @@ pub struct GameWindow {
     pub focused: bool,
 }
 
+/// The overlay window's title, used to find it again for the Win32 calls that
+/// egui does not expose.
+pub const OVERLAY_WINDOW_TITLE: &str = "ED Compass overlay";
+
 /// Window titles Elite Dangerous is known to use, in order of preference.
 pub const GAME_WINDOW_TITLES: [&str; 2] = ["Elite - Dangerous (CLIENT)", "Elite - Dangerous"];
 
@@ -197,6 +216,39 @@ mod imp {
             right: r.right,
             bottom: r.bottom,
         })
+    }
+
+    /// Set the overlay's whole-window opacity, 0 hidden and 255 solid.
+    ///
+    /// This is what SrvSurvey does — its plotters set `Form.Opacity = 0` rather
+    /// than hiding or closing — and underneath, `Form.Opacity` is exactly this
+    /// call. The window stays open, keeps its position and keeps rendering; it
+    /// simply composites to nothing.
+    ///
+    /// Two properties make it safe here. The overlay already carries
+    /// `WS_EX_LAYERED`, because winit sets it alongside `WS_EX_TRANSPARENT` for
+    /// a click-through window, so no style change is needed. And winit
+    /// implements transparency with `DwmEnableBlurBehindWindow` rather than
+    /// `UpdateLayeredWindow`, so a constant alpha composes with the per-pixel
+    /// alpha instead of replacing it.
+    ///
+    /// Returns false if the window is not there yet or the call failed, so the
+    /// caller can fall back to something that cannot fail.
+    pub fn set_overlay_opacity(title: &str, alpha: u8) -> bool {
+        use windows::Win32::Foundation::COLORREF;
+        use windows::Win32::UI::WindowsAndMessaging::{LWA_ALPHA, SetLayeredWindowAttributes};
+
+        let name = wide(title);
+        // SAFETY: a null class with a NUL-terminated title; the handle is only
+        // compared and passed back to Win32, never dereferenced.
+        let Ok(hwnd) = (unsafe { FindWindowW(PCWSTR::null(), PCWSTR(name.as_ptr())) }) else {
+            return false;
+        };
+        if hwnd.is_invalid() {
+            return false;
+        }
+        // SAFETY: `hwnd` is our own window, and it already has WS_EX_LAYERED.
+        unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA) }.is_ok()
     }
 
     /// Find the game window by title, if it is running and visible.
@@ -241,13 +293,18 @@ mod imp {
 mod imp {
     use super::GameWindow;
 
+    /// No layered windows off Windows; the caller falls back to moving it.
+    pub fn set_overlay_opacity(_title: &str, _alpha: u8) -> bool {
+        false
+    }
+
     /// The game only exists on Windows as far as this tool is concerned.
     pub fn find_game_window(_titles: &[&str]) -> Option<GameWindow> {
         None
     }
 }
 
-pub use imp::find_game_window;
+pub use imp::{find_game_window, set_overlay_opacity};
 
 /// What the overlay needs to know each time it is considered.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -337,6 +394,30 @@ mod tests {
             bottom: 1280,
         };
         assert_eq!(a.position_in(moved), (860.0, 200.0));
+    }
+
+    #[test]
+    fn the_parked_position_is_off_every_plausible_desktop() {
+        let (x, y) = PARKED_POSITION;
+
+        // Beyond any real monitor arrangement, including a wide multi-head
+        // desktop, so no part of the overlay can be on screen while parked.
+        assert!(x >= 16_000.0, "parked x {x} could land on a wide desktop");
+        assert!(y >= 16_000.0, "parked y {y} could land on a tall desktop");
+
+        // Positive rather than negative: a negative position would land on a
+        // monitor arranged to the left of the primary one, which is a common
+        // setup and would put the overlay right back on screen.
+        assert!(
+            x > 0.0 && y > 0.0,
+            "negative coordinates hit left/upper monitors"
+        );
+
+        // Inside the range the window manager works in.
+        assert!(
+            x < 32_768.0 && y < 32_768.0,
+            "outside the 16-bit window space"
+        );
     }
 
     #[test]
