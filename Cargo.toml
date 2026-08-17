@@ -35,7 +35,19 @@ chrono = "0.4.45"
 clap = { version = "4.6.6", features = ["derive"] }
 claxon = "0.4.3"
 crossbeam-channel = "0.5.16"
-eframe = "0.35.0"
+# The OpenGL backend, not the default wgpu one. Every crash this tool has had
+# in the field was the same wgpu validation error — a texture reported invalid
+# inside `egui_wgpu::Renderer::update_texture` — while running two viewports
+# (the control window and the in-game overlay). Four separate fixes narrowed it
+# without removing it. `glow` is a different renderer implementation of the
+# exact function that fails, and this application asks nothing of the GPU that
+# OpenGL cannot do: two 2D panels and a spectrogram bitmap.
+eframe = { version = "0.35.0", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
 egui = "0.35.0"
 env_logger = "0.11.11"
 flacenc = "0.5.1"
@@ -49,7 +61,7 @@ thiserror = "2.0.20"
 toml = "1.1.4"
 
 [target."cfg(windows)".dependencies]
-windows = { version = "0.62.2", features = ["Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_Foundation", "Win32_Devices_FunctionDiscovery", "Win32_System_Threading", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem", "Win32_System_Performance", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_Storage_FileSystem"] }
+windows = { version = "0.62.2", features = ["Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_Foundation", "Win32_Devices_FunctionDiscovery", "Win32_System_Threading", "Win32_Security", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem", "Win32_System_Performance", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_Storage_FileSystem"] }
 
 [lints.clippy]
 # Tests build a Config from Default and then override the few fields that

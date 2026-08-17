@@ -32,6 +32,14 @@ pub mod hud {
     /// The pale cyan of a resolved contact, kept for reference; the lamps used
     /// it first and it read as part of the scenery. Not currently used.
     pub const CYAN: Color32 = Color32::from_rgb(203, 249, 251);
+    /// Blue for the two supporting detectors.
+    ///
+    /// TRANSMIT and STRUCTURE both light on ordinary ship ambience — measured,
+    /// not assumed — so they are hints, not findings. Only SIGNAL has been
+    /// checked against a known recording, and it keeps green to itself. Sharing
+    /// one colour taught the eye that green means "maybe", which is the
+    /// opposite of what an alarm is for.
+    pub const BLUE: Color32 = Color32::from_rgb(77, 166, 255);
     /// Bright green for a lit lamp. Deliberately *not* an Elite colour: the
     /// cockpit is orange on black, so green is the one thing guaranteed to be
     /// nothing else on screen — and peak human photopic sensitivity sits at
@@ -358,10 +366,12 @@ pub fn overlay(ui: &mut egui::Ui, state: &OverlayState, spectrogram: Option<&egu
         state.landscape,
         hud::GREEN,
     );
+    // Amber still overrides for a suspect detection: "this looks like music"
+    // is worth more than "something is keying".
     let keying_colour = if state.keying_suspect {
         hud::AMBER
     } else {
-        hud::GREEN
+        hud::BLUE
     };
     hud_lamp(
         &painter,
@@ -377,7 +387,7 @@ pub fn overlay(ui: &mut egui::Ui, state: &OverlayState, spectrogram: Option<&egu
         "STRUCTURE",
         &state.structure_detail,
         state.structure,
-        hud::GREEN,
+        hud::BLUE,
     );
 }
 
@@ -622,6 +632,29 @@ mod tests {
         state.spectrogram = Some(egui::ColorImage::filled([4, 2], egui::Color32::RED));
         let carried = state.spectrogram.expect("pixels");
         assert_eq!(carried.size, [4, 2]);
+    }
+
+    #[test]
+    fn only_the_validated_detector_gets_the_find_colour() {
+        // SIGNAL is the one measurement checked against a known recording;
+        // TRANSMIT and STRUCTURE also light on ordinary ship ambience. They
+        // must not share a colour, or green stops meaning anything.
+        assert_ne!(hud::GREEN, hud::BLUE);
+        assert!(
+            hud::BLUE.b() > hud::BLUE.g() && hud::BLUE.b() > hud::BLUE.r(),
+            "the supporting detectors read blue"
+        );
+        assert!(
+            hud::GREEN.g() > hud::GREEN.b() * 2,
+            "the validated detector keeps green to itself"
+        );
+
+        // Both must still carry against an unlit lamp on a black panel.
+        let sum = |c: egui::Color32| c.r() as u32 + c.g() as u32 + c.b() as u32;
+        assert!(
+            sum(hud::BLUE) > sum(hud::IDLE) * 3,
+            "a lit hint must be legible"
+        );
     }
 
     #[test]

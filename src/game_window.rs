@@ -118,6 +118,14 @@ pub struct PlotterGap {
     pub margin: f32,
     /// Below this the band is not worth using and the configured width wins.
     pub min_width: f32,
+    /// Grow the band by this fraction of its own width at each end.
+    ///
+    /// Sizing against the *widest* plotter of each cluster is conservative:
+    /// PlotJumpInfo at 600 only appears during a jump, and PlotBodyInfo at 320
+    /// only near a body. Left strictly inside those bounds the overlay is
+    /// narrower than it needs to be almost all the time, so it is allowed to
+    /// reach a little into ground the widest plotters would claim.
+    pub expand_each_side: f32,
 }
 
 impl Default for PlotterGap {
@@ -127,6 +135,7 @@ impl Default for PlotterGap {
             centre_width: 600.0,
             margin: 8.0,
             min_width: 260.0,
+            expand_each_side: 0.10,
         }
     }
 }
@@ -138,7 +147,14 @@ impl PlotterGap {
         let left = self.left_edge + self.margin;
         let right = game_width / 2.0 - self.centre_width / 2.0 - self.margin;
         let width = right - left;
-        (width >= self.min_width).then_some((left, width))
+        if width < self.min_width {
+            return None;
+        }
+        // Grow outward from the strict band, never past the window edge.
+        let grow = width * self.expand_each_side;
+        let left = (left - grow).max(0.0);
+        let width = (width + 2.0 * grow).min(game_width - left);
+        Some((left, width))
     }
 }
 
@@ -327,18 +343,26 @@ mod tests {
     fn the_free_band_matches_srvsurvey_s_own_layout() {
         let gap = PlotterGap::default();
 
-        // 2560x1440: top-left plotters end at 328, the widest centred one
-        // starts at 1280 - 300 = 980. Minus 8 px of clearance each side.
+        // 2560x1440: the strict band runs 336..972, 636 wide. It is then grown
+        // by a tenth of its own width at each end, because the plotters it
+        // avoids are the widest possible rather than the ones usually on screen.
         let (x, w) = gap.band(2560.0).expect("a 2560-wide window has room");
-        assert_eq!(x, 336.0);
-        assert_eq!(w, 636.0);
+        assert_eq!(x, 336.0 - 63.6);
+        assert!((w - 763.2).abs() < 0.01, "width {w}");
+
+        // Strictly inside the band with no expansion.
+        let strict = PlotterGap {
+            expand_each_side: 0.0,
+            ..PlotterGap::default()
+        };
+        let (x, w) = strict.band(2560.0).unwrap();
+        assert_eq!((x, w), (336.0, 636.0));
         assert!(x + w <= 980.0, "must not reach PlotJumpInfo at 980");
         assert!(x >= 328.0, "must not reach PlotBodyInfo ending at 328");
 
-        // 1920 is tighter but still usable.
+        // 1920 is tighter but still usable, and never runs off the left edge.
         let (x, w) = gap.band(1920.0).expect("1920 still has room");
-        assert_eq!(x, 336.0);
-        assert!((x + w) <= 960.0 - 300.0);
+        assert!(x >= 0.0 && x + w <= 1920.0, "x={x} w={w}");
 
         // A small window has no useful band at all.
         assert_eq!(gap.band(1280.0), None);

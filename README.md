@@ -64,7 +64,8 @@ fires, the audio is saved automatically, tagged with the star system and
 coordinates you were at.
 
 **TRANSMIT and STRUCTURE also light on ordinary ship ambience.** They are hints,
-not verdicts. SIGNAL is the one that has been checked.
+not verdicts, and they light **blue** to say so. SIGNAL lights **green** — it is
+the one that has been checked against a real recording.
 
 ## Is this allowed?
 
