@@ -323,7 +323,11 @@ impl Default for Config {
             // and it needs headroom.
             keying_threshold: 0.75,
             keying_min_hz: 400.0,
-            structure_threshold: 0.35,
+            // Raised from 0.35 with the continuity metric. Measured: synthetic
+            // line art scores 0.977 and synthetic mountains 0.998, while the
+            // worst real recording reaches 0.699. The old score could not be
+            // thresholded at all — it ranked noise above line art.
+            structure_threshold: 0.85,
             detector_capture_seconds: 130.0,
 
             overlay_enabled: true,

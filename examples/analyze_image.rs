@@ -120,5 +120,6 @@ fn report(s: &ed_compass::analysis::structure::StructureScore) {
     println!("  sparsity              {:.3}", s.sparsity);
     println!("  orientation diversity {:.3}", s.orientation_diversity);
     println!("  diagonality           {:.3}", s.diagonality);
+    println!("  continuity            {:.3}", s.continuity);
     println!("  edge pixels           {}", s.edge_pixels);
 }

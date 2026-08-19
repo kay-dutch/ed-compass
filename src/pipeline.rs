@@ -672,7 +672,15 @@ impl AnalysisEngine {
                 }
             }
 
-            let (score, x, y) = scanner.scan(&self.scan_image, columns, rows);
+            // Strip the two things ambience is made of before looking for a
+            // drawing: sustained tones and transients. What survives is neither,
+            // which is where a drawn stroke lives.
+            let cleaned = crate::analysis::structure::suppress_tones_and_transients(
+                &self.scan_image,
+                columns,
+                rows,
+            );
+            let (score, x, y) = scanner.scan(&cleaned, columns, rows);
             if score.score > self.peak_structure.score {
                 self.peak_structure = score.clone();
                 self.peak_structure_at = self.elapsed_seconds();
@@ -1324,10 +1332,16 @@ mod tests {
         feed(&mut engine, &mut picture, 35.0);
 
         let s = engine.structure().clone();
-        assert!(s.is_present(0.05), "the drawing should be found: {s:?}");
+        assert!(s.is_present(0.85), "the drawing should be found: {s:?}");
+        // Continuity, not orientation diversity. The scanner returns the
+        // highest-*scoring* tile, and the score is now driven by continuity, so
+        // the tile it picks is the one with the longest strokes rather than the
+        // one with the most varied gradients. Diversity remains a diagnostic —
+        // measured, it sits between 0.45 and 0.97 on line art and on ambience
+        // alike, which is why it no longer decides anything.
         assert!(
-            s.orientation_diversity > 0.5,
-            "a circle spans many orientations: {s:?}"
+            s.continuity > 0.8,
+            "a drawing is made of long connected strokes: {s:?}"
         );
     }
 
