@@ -265,7 +265,7 @@ impl OverlayState {
         let (keying, structure) = app.detections_present();
         let (keying_detail, structure_detail) = detail_lines(app);
         Self {
-            landscape: app.landscape_present(),
+            landscape: app.signal_present(),
             keying,
             keying_suspect: app.keying_suspect(),
             structure,

@@ -276,6 +276,24 @@ impl App {
         self.landscape_present
     }
 
+    /// Thargoid Sensor Morse, if it is being heard.
+    pub fn morse(&self) -> Option<crate::analysis::morse::MorseDetection> {
+        self.engine.as_ref().and_then(|e| e.morse())
+    }
+
+    /// Whether the SIGNAL lamp should be lit.
+    ///
+    /// One lamp, several recognised signals. The Landscape Signal is identified
+    /// by its period and Thargoid Sensor Morse by its dot/dash ratio; both mean
+    /// "something known is transmitting", so both light the same indicator and
+    /// the detail line says which.
+    pub fn signal_present(&self) -> bool {
+        self.landscape_present
+            || self
+                .morse()
+                .is_some_and(|m| m.is_present(self.cfg.morse_threshold))
+    }
+
     /// The current period estimate, for display.
     pub fn periodicity(&self) -> Option<crate::analysis::periodicity::PeriodicityResult> {
         self.engine.as_ref().and_then(|e| e.periodicity())

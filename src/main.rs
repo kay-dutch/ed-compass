@@ -303,6 +303,7 @@ fn run_headless(mut app: App, duration: Option<f32>, export_png: Option<PathBuf>
     // Read the configured thresholds rather than repeating literals here, or the
     // console disagrees with the UI about what counts as a detection.
     let keying_threshold = app.config().keying_threshold;
+    let morse_threshold = app.config().morse_threshold;
     let structure_threshold = app.config().structure_threshold;
     let started = std::time::Instant::now();
     let mut reported = 0usize;
@@ -472,6 +473,24 @@ fn run_headless(mut app: App, duration: Option<f32>, export_png: Option<PathBuf>
                 }
             ),
             None => println!("Binary keying: no symbols observed"),
+        }
+        match &snap.morse {
+            Some(m) => println!(
+                "Morse keying: confidence {:.2} — tone {:.0} Hz, dot {:.0} ms, \
+                 dash {:.0} ms, ratio {:.2}, {} marks{}",
+                m.confidence,
+                m.tone_hz,
+                m.dot_seconds * 1000.0,
+                m.dash_seconds * 1000.0,
+                m.ratio,
+                m.marks,
+                if m.is_present(morse_threshold) {
+                    "  ← MORSE PRESENT"
+                } else {
+                    ""
+                }
+            ),
+            None => println!("Morse keying: no marks observed"),
         }
         if let Some(engine) = app.engine() {
             let (peak, at) = engine.peak_structure();

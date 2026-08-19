@@ -158,6 +158,16 @@ pub struct Config {
     pub overlay_x_fraction: f32,
     /// Overlay top edge as a fraction of the game window height.
     pub overlay_y_fraction: f32,
+    /// Look for a single low tone switched on and off, like Thargoid Sensor
+    /// Morse.
+    pub detect_morse: bool,
+    /// Band the Morse tone is expected in. The reference measures 111 Hz, which
+    /// is below `detect_min_hz` and far below `keying_min_hz` — this detector
+    /// needs its own band or the low-frequency floor hides it.
+    pub morse_min_hz: f32,
+    pub morse_max_hz: f32,
+    /// Confidence at which the Morse lamp lights.
+    pub morse_threshold: f32,
     /// Which renderer to draw with: "glow" or "wgpu".
     ///
     /// Both are compiled in. glow is the default; wgpu is there so a machine
@@ -322,6 +332,10 @@ impl Default for Config {
             // lives there, and it leaves the centre and right panels clear.
             overlay_x_fraction: 0.0,
             overlay_y_fraction: 0.0,
+            detect_morse: true,
+            morse_min_hz: 60.0,
+            morse_max_hz: 200.0,
+            morse_threshold: 0.75,
             renderer: "glow".into(),
             overlay_fit_between_plotters: true,
             overlay_x_offset_px: 220.0,
@@ -496,6 +510,12 @@ impl Config {
         anyhow::ensure!(
             self.health_window_seconds > 0.0,
             "health_window_seconds must be > 0"
+        );
+        anyhow::ensure!(
+            self.morse_min_hz > 0.0 && self.morse_max_hz > self.morse_min_hz,
+            "morse_max_hz ({}) must be above morse_min_hz ({})",
+            self.morse_max_hz,
+            self.morse_min_hz
         );
         anyhow::ensure!(
             matches!(self.renderer.as_str(), "glow" | "wgpu"),
@@ -820,6 +840,10 @@ mod tests {
         "protect_best_captures",
         "export_budget_mb",
         "capture_format",
+        "detect_morse",
+        "morse_min_hz",
+        "morse_max_hz",
+        "morse_threshold",
         "renderer",
         "journal_enabled",
         "journal_path",

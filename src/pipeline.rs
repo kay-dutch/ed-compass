@@ -13,6 +13,7 @@ use realfft::num_complex::Complex32;
 
 use crate::analysis::direction::{self, DirectionEstimate};
 use crate::analysis::keying::{KeyingDetection, KeyingDetector};
+use crate::analysis::morse::{MorseDetection, MorseDetector};
 use crate::analysis::novelty::{DetectionEvent, FrameGeometry, NoveltyDetector};
 use crate::analysis::periodicity::{self, PeriodicityResult};
 use crate::analysis::spectrogram::{DbRange, LongTermSummarizer, SpectrogramHistory};
@@ -112,6 +113,8 @@ pub struct AnalysisSnapshot {
     // ---- primary detectors ----
     /// Binary keying, when enough symbols have been seen to judge.
     pub keying: Option<KeyingDetection>,
+    /// A single low tone switched on and off — Thargoid Sensor Morse.
+    pub morse: Option<MorseDetection>,
     /// Best drawn-structure score across the waterfall, with the tile it came
     /// from as `(x, y)` in spectrogram pixels.
     pub structure: StructureScore,
@@ -161,6 +164,7 @@ pub struct AnalysisEngine {
 
     /// Primary detector: binary keying. Fed one dominant-bin index per frame.
     keying: Option<KeyingDetector>,
+    morse: Option<MorseDetector>,
     /// Primary detector: drawn structure in the spectrogram.
     structure_scanner: Option<StructureScanner>,
     structure: StructureScore,
@@ -280,6 +284,15 @@ impl AnalysisEngine {
             excess_scratch: Vec::new(),
             keying: cfg.detect_keying.then(|| {
                 KeyingDetector::new(geometry.frame_seconds(), format.sample_rate, cfg.fft_size)
+            }),
+            morse: cfg.detect_morse.then(|| {
+                MorseDetector::new(
+                    geometry.frame_seconds(),
+                    format.sample_rate,
+                    cfg.fft_size,
+                    cfg.morse_min_hz,
+                    cfg.morse_max_hz,
+                )
             }),
             structure_scanner: cfg.detect_structure.then(StructureScanner::default),
             structure: StructureScore::empty(),
@@ -569,6 +582,13 @@ impl AnalysisEngine {
     /// over the spectrum just transformed, and the structure scanner reads the
     /// quantized waterfall already maintained for the display.
     fn update_primary_detectors(&mut self) {
+        // Morse reads the spectrum directly rather than the excess: its tone
+        // sits below `detect_min_hz`, where the background model is not applied,
+        // and the detector learns its own floor for exactly that band.
+        if let Some(morse) = self.morse.as_mut() {
+            morse.push(&self.mono_db);
+        }
+
         if self.keying.is_some() {
             // Decide first, borrowing only immutably, then hand the verdict to
             // the detector — it needs `&mut self` and the tests above need `&self`.
@@ -713,6 +733,11 @@ impl AnalysisEngine {
     /// The most recent keying assessment, if there is enough evidence.
     pub fn keying(&self) -> Option<KeyingDetection> {
         self.keying.as_ref().and_then(|k| k.evaluate())
+    }
+
+    /// The most recent Morse assessment, if there is enough evidence.
+    pub fn morse(&self) -> Option<MorseDetection> {
+        self.morse.as_ref().and_then(|m| m.evaluate())
     }
 
     /// The most recent drawn-structure score.
@@ -863,6 +888,7 @@ impl AnalysisEngine {
             open_events: self.detector.open_event_count(),
             is_silent: stats.is_silent(),
             keying: self.keying(),
+            morse: self.morse(),
             structure: self.structure.clone(),
             structure_tile: self.structure_tile,
         }

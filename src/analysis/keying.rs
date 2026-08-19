@@ -235,6 +235,24 @@ impl KeyingDetector {
 
         let symbol_rate_hz = 1.0 / (median as f32 * self.frame_seconds);
 
+        // Refuse to report timing the analysis cannot actually resolve.
+        //
+        // A symbol lasting `min_symbol_frames` is the shortest this detector can
+        // represent, so a median sitting on that floor means the dominant bin is
+        // changing as fast as the frame rate allows. At that point a real
+        // transmission and a jittering argmax produce identical evidence, and
+        // the reported rate is a property of the instrument rather than of the
+        // audio: at a 2048-sample hop and 48 kHz it is always 11.72 symbols/s,
+        // which is exactly what two unrelated field recordings reported.
+        //
+        // Measuring a symbol period needs more than the two frames that merely
+        // make it representable, the same way resolving a waveform needs more
+        // than the two samples that satisfy Nyquist.
+        const MIN_RESOLVABLE_FRAMES: usize = 3;
+        if median < MIN_RESOLVABLE_FRAMES.max(self.min_symbol_frames + 1) {
+            return None;
+        }
+
         // Tone stability: do the second half's tones match the first half's?
         let tone_stability = {
             let mid = self.symbols.len() / 2;
@@ -351,6 +369,94 @@ mod tests {
                 d.push(bin, true);
             }
         }
+    }
+
+    /// Timing at the analysis floor is the instrument, not the audio.
+    ///
+    /// Two unrelated field recordings both reported exactly 11.72 symbols/s,
+    /// which is `frame_rate / 2` for a 2048-sample hop at 48 kHz — the fastest
+    /// rate this detector can express, reached when every symbol sits on
+    /// `min_symbol_frames`. That is what a jittering dominant bin looks like,
+    /// and it is indistinguishable from a real transmission at that rate, so it
+    /// must not be reported at all.
+    /// Single-tone on/off keying — Morse — scores nothing here.
+    ///
+    /// Recorded as a known limitation rather than a defect. This detector was
+    /// built for the Thargoid *Probe* tightbeam, which is multi-tone FSK, and
+    /// `alphabet_term` is zero unless at least two distinct tones are in use.
+    /// Thargoid *Sensor* Morse is one tone switched on and off, so it cannot
+    /// score, however clean it is.
+    #[test]
+    fn single_tone_morse_is_currently_invisible() {
+        let mut d = detector();
+        // One tone, varying dwell times: dots and dashes.
+        for (i, len) in [4usize, 4, 12, 4, 12, 12, 4, 4, 12, 4, 4, 12]
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            for _ in 0..len {
+                d.push(60, true);
+            }
+            // The gap between marks is silence, not another tone.
+            for _ in 0..4 {
+                d.push(60, false);
+            }
+            let _ = i;
+        }
+
+        match d.evaluate() {
+            None => {}
+            Some(r) => assert_eq!(
+                r.confidence, 0.0,
+                "one tone cannot satisfy the alphabet term; if this ever \
+                 becomes non-zero, on/off keying is being detected and this \
+                 test should become a positive one"
+            ),
+        }
+    }
+
+    #[test]
+    fn timing_at_the_analysis_floor_is_refused() {
+        let mut d = detector();
+        // Every symbol exactly at the minimum length: the argmax flipping
+        // between two bins as fast as frames arrive.
+        feed_keyed(&mut d, &[40, 80], 2, 60);
+
+        assert!(
+            d.evaluate().is_none(),
+            "a median symbol at the floor cannot be told from bin jitter, so it \
+             must not be reported as keying"
+        );
+    }
+
+    /// The same pattern, slowed down, is exactly what we want to detect.
+    #[test]
+    fn resolvable_symbol_timing_is_still_reported() {
+        let mut d = detector();
+        // Four frames per symbol: comfortably above the floor, so the period is
+        // a measurement rather than an artefact.
+        feed_keyed(&mut d, &[40, 80], 4, 60);
+
+        let r = d
+            .evaluate()
+            .expect("resolvable keying must still be reported");
+        let expected = 1.0 / (4.0 * FRAME_SECONDS);
+        assert!(
+            (r.symbol_rate_hz - expected).abs() < expected * 0.2,
+            "expected about {expected:.1} symbols/s, got {:.1}",
+            r.symbol_rate_hz
+        );
+    }
+
+    /// The rejected rate is a property of the frame rate, and nothing else.
+    #[test]
+    fn the_refused_rate_is_the_frame_rate_not_a_signal() {
+        // Whatever the hop, the artefact lands at frame_rate / min_symbol_frames.
+        // Recording it here so the coincidence in the field data stays legible.
+        let frame_rate: f32 = 48_000.0 / 2048.0;
+        assert!((frame_rate - 23.4375).abs() < 1e-4);
+        assert!((frame_rate / 2.0 - 11.71875).abs() < 1e-4);
     }
 
     #[test]
