@@ -36,7 +36,7 @@ flying you'd normally use the cockpit overlay instead.</sub>
 ## Install
 
 **[⬇ Download the latest release](../../releases)** — run
-`ED-Compass-Setup-0.2.0.exe` and you're done. No administrator rights, nothing else to
+`ED-Compass-Setup-0.3.0.exe` and you're done. No administrator rights, nothing else to
 install.
 
 Windows will say *"unknown publisher"*. Click **More info → Run anyway**. That
@@ -55,7 +55,7 @@ Three indicators, in the order you should trust them:
 
 | | |
 |---|---|
-| **SIGNAL** | A repeating transmission, identified by its measured period. A recognised one is named — the Landscape Signal's 109.5 s cycle is checked against a known recording, so a match means what it says. |
+| **SIGNAL** | Something recognised, named in the line beneath it. Two so far: the Landscape Signal, identified by its 109.5 s period, and a keyed transmission such as Thargoid Sensor Morse. Both were checked against real reference recordings, so a match means what it says. |
 | **TRANSMIT** | Something is keying tones on and off, the way a transmission does. |
 | **STRUCTURE** | The spectrogram has thin diagonal strokes in it — something *drawn* rather than noise. |
 
@@ -63,9 +63,14 @@ Beside them, a live spectrogram of what the game is playing. When something
 fires, the audio is saved automatically, tagged with the star system and
 coordinates you were at.
 
-**TRANSMIT and STRUCTURE also light on ordinary ship ambience.** They are hints,
-not verdicts, and they light **blue** to say so. SIGNAL lights **green** — it is
-the one that has been checked against a real recording.
+**TRANSMIT also lights on ordinary ship ambience.** It is a hint, not a verdict,
+and it lights **blue** to say so. SIGNAL lights **green** — those are the ones
+checked against real reference recordings.
+
+STRUCTURE used to fire on ambience too. It no longer does: sustained tones and
+transients are stripped out before the spectrogram is examined, which took three
+real recordings from 0.67–0.70 down to 0.000 while leaving drawn line art at
+0.98.
 
 ## Is this allowed?
 
