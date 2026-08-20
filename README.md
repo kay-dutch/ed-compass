@@ -8,7 +8,6 @@
 > Detector thresholds, file formats and the interface are all still changing, so
 > anything ED Compass reports should be treated as provisional rather than
 > dependable. Releases are published as pre-releases for the same reason.
->
 > Try it, and please do report what you find — but don't build a discovery claim
 > on it yet.
 
@@ -45,8 +44,15 @@ certificate.
 Then start Elite. The overlay appears by itself whenever the game is in front of
 you, and gets out of the way when it isn't.
 
-> **Elite must run in borderless mode**, not exclusive fullscreen — no overlay of
-> any kind can draw over exclusive fullscreen.
+Two settings in Elite are worth changing:
+
+> **Graphics → Display Mode: Borderless.** Not exclusive fullscreen — no overlay
+> of any kind can draw over it.
+>
+> **Audio → Music: 0.** ED Compass listens to everything your speakers play, and
+> the soundtrack is loud, broadband and full of exactly the sustained tones and
+> drifting notes a real signal looks like. Turning it off is the single biggest
+> thing you can do for detection quality. Ship and effects audio can stay on.
 
 ## What you'll see
 

@@ -214,8 +214,14 @@ fn install_shortcuts() -> Result<()> {
         println!("Created Desktop shortcut: {name}");
     }
     println!();
-    println!("The overlay needs Elite Dangerous in BORDERLESS mode — an exclusive");
-    println!("fullscreen game covers every other window, including this one.");
+    println!("Two settings in Elite are worth changing:");
+    println!();
+    println!("  Graphics -> Display Mode: BORDERLESS. An exclusive-fullscreen game");
+    println!("  covers every other window, including the overlay.");
+    println!();
+    println!("  Audio -> Music: 0. ED Compass hears whatever your speakers play, and");
+    println!("  the soundtrack looks like a signal to every detector here. Ship and");
+    println!("  effects audio can stay on.");
     Ok(())
 }
 
@@ -499,12 +505,13 @@ fn run_headless(mut app: App, duration: Option<f32>, export_png: Option<PathBuf>
             println!("Peak over the whole run — this is the one that matters for a recording,");
             println!("since the live scores describe only the last few seconds:");
             println!(
-                "  structure {:.3} at {:.0} s (coherence {:.2}, sparsity {:.2}, diagonality {:.2}){}",
+                "  structure {:.3} at {:.0} s (continuity {:.2}, drift {:.2} at {:+.0}°, {} lines){}",
                 peak.score,
                 at,
-                peak.coherence,
-                peak.sparsity,
-                peak.diagonality,
+                peak.continuity,
+                peak.drift,
+                peak.drift_angle_deg,
+                peak.drift_lines,
                 if peak.is_present(structure_threshold) {
                     "  ← PICTURE"
                 } else {

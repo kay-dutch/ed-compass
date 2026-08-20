@@ -681,6 +681,11 @@ impl AnalysisEngine {
                 rows,
             );
             let (score, x, y) = scanner.scan(&cleaned, columns, rows);
+            // Integrating along candidate lines reaches strokes too faint to
+            // become ink at all, which the tile sweep above cannot see.
+            let (drift, drift_angle, drift_lines) =
+                crate::analysis::structure::drift_scan(&cleaned, columns, rows);
+            let score = score.with_drift(drift, drift_angle, drift_lines);
             if score.score > self.peak_structure.score {
                 self.peak_structure = score.clone();
                 self.peak_structure_at = self.elapsed_seconds();

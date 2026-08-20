@@ -29,6 +29,14 @@
 //! that directly, by joining ink into connected components and asking how much
 //! of it belongs to strokes that are both long and thin.
 //!
+//! Continuity has one blind spot, and [`drift_scan`] covers it. Joining ink into
+//! components requires ink, and ink requires crossing a brightness threshold, so
+//! a picture drawn quietly enough is invisible however clean its lines are.
+//! Integrating *along* candidate lines instead — a Radon transform, the same
+//! construction SETI uses to find drifting carriers — sums a stroke coherently
+//! while noise adds in quadrature, and reaches strokes that never become ink at
+//! all. Measured, a drawing whose continuity is 0.000 is found at 0.50.
+//!
 //! This runs over the quantized `u8` waterfall the pipeline already maintains.
 //! No transforms, no floating-point image, and the work is proportional to the
 //! tile grid rather than to the audio.
@@ -71,7 +79,7 @@ pub struct StructureScore {
     /// Coherent gain from integrating along drift lines, 0..1.
     ///
     /// Continuity can only follow ink bright enough to cross a threshold. This
-    /// sees lines that are not. See [`drift_search`].
+    /// sees lines that are not. See [`drift_scan`].
     pub drift: f32,
     /// Direction of the strongest drift line, in degrees from horizontal.
     ///
@@ -79,6 +87,11 @@ pub struct StructureScore {
     /// upward, and the magnitude approaches 90 for a near-vertical stroke. Zero
     /// when [`StructureScore::drift`] is zero.
     pub drift_angle_deg: f32,
+    /// How many distinct directions carry an integrated line.
+    ///
+    /// One is a frequency sweep, which ordinary ambience produces constantly.
+    /// A drawing is several.
+    pub drift_lines: u32,
     /// Combined 0..1.
     pub score: f32,
     /// Pixels that carried enough gradient to be counted.
@@ -95,6 +108,7 @@ impl StructureScore {
             continuity: 0.0,
             drift: 0.0,
             drift_angle_deg: 0.0,
+            drift_lines: 0,
             score: 0.0,
             edge_pixels: 0,
         }
@@ -102,6 +116,22 @@ impl StructureScore {
 
     pub fn is_present(&self, threshold: f32) -> bool {
         self.score >= threshold
+    }
+
+    /// Attach the result of [`drift_scan`], which is measured over the whole
+    /// image rather than per tile and so cannot be filled in by [`analyze`].
+    ///
+    /// Drift enters the score as an alternative rather than a factor. The two
+    /// measures answer the same question by opposite routes — continuity follows
+    /// ink that is bright enough to threshold, drift integrates lines too faint
+    /// to leave any — so requiring both would mean a picture had to be
+    /// simultaneously bright and faint. Either is sufficient evidence on its own.
+    pub fn with_drift(mut self, drift: f32, angle_deg: f32, lines: usize) -> Self {
+        self.drift = drift.clamp(0.0, 1.0);
+        self.drift_angle_deg = if self.drift > 0.0 { angle_deg } else { 0.0 };
+        self.drift_lines = lines as u32;
+        self.score = self.score.max(self.drift);
+        self
     }
 }
 
@@ -357,27 +387,72 @@ fn continuity(image: &[u8], width: usize, height: usize, ink_threshold: u8) -> f
     }
 }
 
-/// Slopes tried per side, per axis. Total trials are four times this.
+/// Side of the tile the drift search integrates over.
 ///
-/// Resolution is set by the requirement that a line stay inside its own
-/// accumulator row: over a 64-pixel tile, adjacent slopes must differ by less
-/// than `2/64`, so a range of one covers in about 32 steps.
-const SLOPE_STEPS: usize = 32;
+/// Deliberately larger than the texture tiles [`StructureScanner`] sweeps.
+/// Coherent gain grows as the square root of the line's length, so a 128-pixel
+/// tile reaches 1.4 times further into the noise than a 64-pixel one — and
+/// reaching further is the entire reason this exists.
+///
+/// These tiles do not overlap. A line split across a boundary still integrates
+/// over half its length, which costs 30% of its gain rather than all of it,
+/// and overlapping would quadruple the cost of what is already the most
+/// expensive step in the analysis.
+const DRIFT_TILE: usize = 128;
+
+/// How far a candidate line may wander from a real one, in pixels across the
+/// tile, before it is worth trying another slope.
+///
+/// Angular resolution costs time linearly, and there is nothing to gain by
+/// resolving finer than the strokes are wide. Measured on the detector's own
+/// pooled image, line art's strokes average about 21 pixels across; six is
+/// comfortably inside that, and choosing one pixel instead — the obvious
+/// default — made this pass cost 30.7 ms per audio second against 8.98 for
+/// everything else put together.
+const SLOPE_TOLERANCE_PX: f32 = 6.0;
 
 /// Shallowest slope worth integrating, in rows per column.
 ///
-/// Below this a "line" is a sustained tone, which is what the suppression pass
-/// upstream is already removing; integrating along it would only recover what
-/// was deliberately discarded. The transposed pass applies the same floor, which
-/// is what excludes broadband transients.
-const MIN_SLOPE: f32 = 0.08;
+/// Below this a "line" is a sustained tone, which the suppression pass upstream
+/// is already removing; integrating along it would only recover what was
+/// deliberately discarded. The transposed pass applies the same floor, which is
+/// what excludes broadband transients — so the two together confine the search
+/// to between 14 and 76 degrees.
+///
+/// The band has to be this narrow. At the near-vertical end a line barely
+/// distinguishable from a click scored a confident 1.00 at -85 degrees on a real
+/// recording; at the near-horizontal end a slow drift in engine noise is a real
+/// frequency sweep, but it is not a drawing. Drawn strokes in the published
+/// decodes sit comfortably inside what is left, and anything steeper that is
+/// also bright is still caught by [`continuity`].
+const MIN_SLOPE: f32 = 0.25;
 
-/// A line must cross at least this fraction of the tile to be counted, so the
-/// peak cannot be a corner clipped by two or three pixels.
-const MIN_COVERAGE: f32 = 0.6;
+/// Sigma below which a drift line is not reported at all, and above which it is
+/// called certain.
+///
+/// These are the separation between the best slope and the typical slope,
+/// measured in the spread of the slopes themselves — see [`sweep`]. Chosen from
+/// the measurements in `drift_calibration` and on the real corpus.
+const DRIFT_MIN_SIGMA: f32 = 6.0;
+const DRIFT_FULL_SIGMA: f32 = 12.0;
 
-/// Excess sigma at which drift is called certain.
-const DRIFT_FULL_SIGMA: f32 = 4.0;
+/// Sigma at which one slope counts as carrying a line of its own.
+const LINE_SIGMA: f32 = 3.0;
+
+/// Distinct directions a tile must carry before drift is allowed to claim a
+/// picture.
+///
+/// One line is a frequency sweep and two is two of them, both of which ordinary
+/// ship ambience produces constantly: measured across three field recordings the
+/// drift search found exactly one, two and one, at strengths up to 0.81. The same
+/// recordings contain no drawing. Synthetic line art carries four.
+///
+/// Nothing known is lost by requiring three. The Landscape Signal and the
+/// synthetic picture both register a single drift line, but both are already
+/// detected outright by `continuity` at 1.00 — drift exists to reach pictures too
+/// faint for that, and a faint picture is still a picture, which is to say it has
+/// more than one stroke.
+const MIN_DRIFT_LINES: usize = 3;
 
 /// Coherent integration along candidate drift lines — a Radon transform.
 ///
@@ -399,36 +474,105 @@ const DRIFT_FULL_SIGMA: f32 = 4.0;
 /// expectation, so noise sits at zero by construction.
 ///
 /// Returns the excess mapped to 0..1 and the angle that produced it.
-fn drift_search(image: &[u8], width: usize, height: usize) -> (f32, f32) {
+///
+/// Sweeps [`DRIFT_TILE`]-sized tiles across the whole cleaned image and keeps
+/// the strongest. This is a separate pass from [`StructureScanner`] rather than
+/// another metric inside [`analyze`]: "is a line drifting anywhere in this
+/// picture" is a question about the picture, not a texture statistic about a
+/// 64-pixel neighbourhood, and asking it once per texture tile costs four times
+/// the rest of the analysis for four copies of the same answer.
+pub fn drift_scan(image: &[u8], width: usize, height: usize) -> (f32, f32, usize) {
+    if width < 8 || height < 8 || image.len() < width * height {
+        return (0.0, 0.0, 0);
+    }
+    let tw = DRIFT_TILE.min(width);
+    let th = DRIFT_TILE.min(height);
+    let mut tile = vec![0u8; tw * th];
+    let mut best = (0.0f32, 0.0f32, 0usize);
+
+    let mut y = 0;
+    while y + th <= height {
+        let mut x = 0;
+        while x + tw <= width {
+            for row in 0..th {
+                let src = (y + row) * width + x;
+                tile[row * tw..(row + 1) * tw].copy_from_slice(&image[src..src + tw]);
+            }
+            let found = drift_tile(&tile, tw, th);
+            if found.0 > best.0 {
+                best = found;
+            }
+            x += tw;
+        }
+        y += th;
+    }
+    let (sigma, angle, lines) = best;
+    let strength =
+        ((sigma - DRIFT_MIN_SIGMA) / (DRIFT_FULL_SIGMA - DRIFT_MIN_SIGMA)).clamp(0.0, 1.0);
+    let drift = if lines >= MIN_DRIFT_LINES {
+        strength
+    } else {
+        0.0
+    };
+    if drift > 0.0 {
+        (drift, angle, lines)
+    } else {
+        (0.0, 0.0, lines)
+    }
+}
+
+/// One tile of [`drift_scan`], reported in raw sigma rather than mapped to
+/// 0..1, so that the tests can see the numbers the thresholds were chosen from.
+fn drift_tile(image: &[u8], width: usize, height: usize) -> (f32, f32, usize) {
     if width < 8 || height < 8 {
-        return (0.0, 0.0);
+        return (0.0, 0.0, 0);
     }
 
-    // Mean-subtracted once, and shared by every slope: the accumulator sums must
-    // be centred on zero or a bright tile would outrank a drawn one.
-    let mean = image[..width * height].iter().map(|v| *v as f32).sum::<f32>()
-        / (width * height) as f32;
-    let centred: Vec<f32> = image[..width * height]
-        .iter()
-        .map(|v| *v as f32 - mean)
-        .collect();
+    // Whitened once, and shared by every slope.
+    //
+    // Subtracting a single global mean is not enough, and the failure is
+    // specific: a *near-vertical* candidate line lies inside one or two columns,
+    // so its integral measures how loud that column is rather than whether
+    // anything drifts along it. On a real recording that scored a confident 1.00
+    // at +82 degrees — a loud frame, read as a drawing. Scaling every row and
+    // every column to a common spread first removes the advantage, so a line has
+    // to be a line rather than a coincidence of brightness.
+    let mut centred: Vec<f32> = image[..width * height].iter().map(|v| *v as f32).collect();
+    let mut scratch: Vec<f32> = centred.clone();
+    scratch.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let global_spread = (scratch[3 * scratch.len() / 4] - scratch[scratch.len() / 4]) / 1.349;
+    whiten(
+        &mut centred,
+        width,
+        height,
+        1,
+        width,
+        global_spread,
+        &mut scratch,
+    );
+    // The first pass leaves the image on a scale of one, which is the right
+    // fallback for the second.
+    whiten(&mut centred, height, width, width, 1, 1.0, &mut scratch);
+    // With the scale now known to be one, a single extreme pixel is the other
+    // way an integral can be faked. Clipping costs a real stroke almost nothing —
+    // it is long, not tall — and denies an impulse the chance to carry a line on
+    // its own.
+    for v in centred.iter_mut() {
+        *v = v.clamp(-CLIP_SIGMA, CLIP_SIGMA);
+    }
     let transposed: Vec<f32> = (0..width * height)
         .map(|i| centred[(i % height) * width + i / height])
         .collect();
 
-    let mut best = (0.0f32, 0.0f32);
+    let mut best = (0.0f32, 0.0f32, 0usize);
+    let mut lines_total = 0usize;
     for (data, w, h, steep) in [
         (&centred, width, height, false),
         (&transposed, height, width, true),
     ] {
-        let (sigma, slope, trials) = sweep(data, w, h);
-        if trials < 2 {
-            continue;
-        }
-        // Gumbel: the largest of `trials` standard normals lands here on average.
-        let expected_max = (2.0 * (trials as f32).ln()).sqrt();
-        let drift = ((sigma - expected_max) / DRIFT_FULL_SIGMA).clamp(0.0, 1.0);
-        if drift > best.0 {
+        let (sigma, slope, lines) = sweep(data, w, h);
+        lines_total += lines;
+        if sigma > best.0 {
             // In the transposed pass a slope of `s` rows per column describes a
             // line that is `1/s` in the original, hence the complement.
             let angle = if steep {
@@ -436,27 +580,87 @@ fn drift_search(image: &[u8], width: usize, height: usize) -> (f32, f32) {
             } else {
                 slope.atan().to_degrees()
             };
-            best = (drift, angle);
+            best = (sigma, angle, 0);
         }
     }
-    best
+    (best.0, best.1, lines_total)
 }
 
-/// One orientation of [`drift_search`]: the peak in sigma, its slope, and how
+/// Spreads beyond which a pixel is clipped before integration.
+const CLIP_SIGMA: f32 = 3.0;
+
+/// Centre and scale each line of the image, so that no single loud row or column
+/// carries more weight into an integral than any other.
+///
+/// Element `k` of line `j` lives at `j * step + k * stride`, which lets the same
+/// code do rows and columns. Median and interquartile range rather than mean and
+/// standard deviation, for the usual reason: the strokes being looked for are
+/// outliers, and must not be allowed to set the scale they are measured against.
+/// `fallback` is the scale to use for a line whose own spread is degenerate.
+/// This is not a corner case to be tidied away: on clean line art most columns
+/// are bare ground with an interquartile range of exactly zero, and scaling them
+/// by their own spread erased the drawing completely — measured 0.000 on an
+/// image whose continuity was 0.933.
+fn whiten(
+    data: &mut [f32],
+    lines: usize,
+    len: usize,
+    step: usize,
+    stride: usize,
+    fallback: f32,
+    scratch: &mut Vec<f32>,
+) {
+    if len < 4 {
+        return;
+    }
+    for line in 0..lines {
+        let base = line * step;
+        scratch.clear();
+        scratch.extend((0..len).map(|k| data[base + k * stride]));
+        scratch.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = scratch[len / 2];
+        let spread = (scratch[3 * len / 4] - scratch[len / 4]) / 1.349;
+        let scale = if spread > 0.0 {
+            1.0 / spread
+        } else if fallback > 0.0 {
+            1.0 / fallback
+        } else {
+            1.0
+        };
+        for k in 0..len {
+            let v = &mut data[base + k * stride];
+            *v = (*v - median) * scale;
+        }
+    }
+}
+
+/// One orientation of [`drift_tile`]: the peak in sigma, its slope, and how
 /// many independent trials produced it.
 fn sweep(data: &[f32], width: usize, height: usize) -> (f32, f32, usize) {
     let centre = width as f32 / 2.0;
-    let min_cover = (MIN_COVERAGE * width as f32) as usize;
+    // One step moves the far end of the line by SLOPE_TOLERANCE_PX pixels.
+    let steps = ((2.0 * width as f32 / SLOPE_TOLERANCE_PX).ceil() as usize).max(4);
     let mut acc = vec![0.0f32; height];
     let mut count = vec![0u32; height];
-    // Every normalized sum, pooled across slopes: they share a noise scale, so
-    // the distribution of the lot is the yardstick the peak is measured against.
-    let mut pooled: Vec<f32> = Vec::with_capacity(height * SLOPE_STEPS * 2);
+    // The best sum each slope achieves, one entry per slope.
+    //
+    // The first version of this compared the single best sum against the *bulk*
+    // of all sums, which assumes the bulk has Gaussian tails. The scan image is
+    // built by max-pooling, which is about as far from Gaussian as a statistic
+    // gets, and the result was a confident 1.00 on stationary pink noise. Every
+    // slope's maximum is drawn from the same skewed distribution as every other
+    // slope's, so comparing maxima to maxima needs no distributional assumption
+    // at all: under noise they agree, and a real line makes exactly one of them
+    // disagree.
+    let mut pooled: Vec<f32> = Vec::with_capacity(steps * height);
+    // The best sum each slope achieved, kept in slope order so that runs of
+    // adjacent slopes can be collapsed into one line.
+    let mut per_slope: Vec<(f32, f32)> = Vec::with_capacity(steps);
     let mut peak = (f32::NEG_INFINITY, 0.0f32);
 
-    for step in 0..SLOPE_STEPS * 2 {
+    for step in 0..steps {
         // Slopes from -1 to 1, skipping the shallow band around zero.
-        let t = step as f32 / (SLOPE_STEPS * 2 - 1) as f32;
+        let t = step as f32 / (steps - 1) as f32;
         let slope = -1.0 + 2.0 * t;
         if slope.abs() < MIN_SLOPE {
             continue;
@@ -474,22 +678,36 @@ fn sweep(data: &[f32], width: usize, height: usize) -> (f32, f32, usize) {
             }
         }
 
+        // Only lines that cross the tile completely, so every sum is over
+        // exactly `width` pixels and they all share one noise scale.
+        //
+        // This restriction is what makes pooling them legitimate. Without it a
+        // line clipped to a corner is summed over a handful of pixels and is
+        // far noisier than one crossing the whole tile, so the pool mixes
+        // distributions of different widths — its spread then describes neither,
+        // and the peak measured against it read a confident 1.00 on stationary
+        // pink noise.
+        let scale = (width as f32).sqrt();
+        let mut best_here = f32::NEG_INFINITY;
         for (offset, slot) in acc.iter().enumerate() {
-            if (count[offset] as usize) < min_cover {
+            if count[offset] as usize != width {
                 continue;
             }
-            // Dividing by sqrt(n) rather than n keeps the noise scale constant
-            // across offsets that saw different numbers of pixels, so short and
-            // long lines are directly comparable.
-            let z = slot / (count[offset] as f32).sqrt();
+            let z = slot / scale;
             pooled.push(z);
+            if z > best_here {
+                best_here = z;
+            }
             if z > peak.0 {
                 peak = (z, slope);
             }
         }
+        if best_here.is_finite() {
+            per_slope.push((slope, best_here));
+        }
     }
 
-    if pooled.len() < 8 {
+    if pooled.len() < 16 {
         return (0.0, 0.0, 0);
     }
     pooled.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -500,10 +718,33 @@ fn sweep(data: &[f32], width: usize, height: usize) -> (f32, f32, usize) {
     let q1 = pooled[pooled.len() / 4];
     let q3 = pooled[3 * pooled.len() / 4];
     let spread = (q3 - q1) / 1.349;
-    if !(spread > 0.0) {
+    if spread <= 0.0 {
         return (0.0, 0.0, 0);
     }
-    ((peak.0 - median) / spread, peak.1, pooled.len())
+    // The peak is the largest of this many sums, and the largest of `n` samples
+    // stands roughly `sqrt(2 ln n)` out whether or not anything is there.
+    // Subtracting it leaves an empty tile at zero by construction.
+    let expected_max = (2.0 * (pooled.len() as f32).ln()).sqrt();
+    let sigma = (peak.0 - median) / spread - expected_max;
+
+    // How many *distinct* directions carry a line.
+    //
+    // One line is a frequency sweep, and ambience is full of them — a slow drift
+    // in engine noise is a real diagonal, just not a drawn one. A picture is
+    // several strokes pointing several ways, which is the same argument
+    // `orientation_diversity` makes about gradients, applied to integrated lines
+    // where it can reach much fainter ink. Adjacent slopes are collapsed because
+    // a single stroke lights a few neighbouring ones.
+    let mut lines = 0usize;
+    let mut in_run = false;
+    for (_, best) in &per_slope {
+        let significant = (best - median) / spread - expected_max >= LINE_SIGMA;
+        if significant && !in_run {
+            lines += 1;
+        }
+        in_run = significant;
+    }
+    (sigma, peak.1, lines)
 }
 
 pub fn analyze(image: &[u8], width: usize, height: usize) -> StructureScore {
@@ -657,16 +898,15 @@ pub fn analyze(image: &[u8], width: usize, height: usize) -> StructureScore {
     let score =
         (continuity.clamp(0.0, 1.0) * (0.5 + 0.5 * coherence.clamp(0.0, 1.0))).clamp(0.0, 1.0);
 
-    let (drift, drift_angle_deg) = drift_search(image, width, height);
-
     StructureScore {
         coherence: coherence.clamp(0.0, 1.0),
         sparsity: sparsity.clamp(0.0, 1.0),
         orientation_diversity,
         diagonality,
         continuity,
-        drift,
-        drift_angle_deg,
+        drift: 0.0,
+        drift_angle_deg: 0.0,
+        drift_lines: 0,
         score,
         edge_pixels,
     }
@@ -1060,62 +1300,180 @@ mod tests {
         img
     }
 
+    /// The drift search, over everything it has to tell apart.
+    ///
+    /// The numbers in the table are what was measured when the thresholds were
+    /// chosen; the assertions are the properties that must hold. It prints as
+    /// well as asserting, because the next person to move a threshold will want
+    /// to see the whole picture move, not just the one case that broke.
     #[test]
-    fn drift_calibration() {
-        let cases: Vec<(&str, Vec<u8>)> = vec![
-            ("noise only", noisy_ground(90, 60, 0x1234_5678)),
-            ("noise only (2)", noisy_ground(90, 60, 0xDEAD_BEEF)),
-            ("faint diagonal", {
-                let mut i = noisy_ground(90, 60, 0x1234_5678);
-                line(&mut i, 0, 10, 95, 80, 150);
-                i
-            }),
-            ("very faint diagonal", {
-                let mut i = noisy_ground(90, 60, 0x1234_5678);
-                line(&mut i, 0, 10, 95, 80, 115);
-                i
-            }),
-            ("bright diagonal", {
-                let mut i = noisy_ground(90, 60, 0x1234_5678);
-                line(&mut i, 0, 10, 95, 80, 255);
-                i
-            }),
-            ("steep diagonal", {
-                let mut i = noisy_ground(90, 60, 0x1234_5678);
-                line(&mut i, 10, 0, 80, 95, 150);
-                i
-            }),
-            ("horizontal tones", {
-                let mut i = noisy_ground(90, 60, 0x1234_5678);
-                for y in [20usize, 40, 60] {
-                    hline(&mut i, y, 200);
-                }
-                i
-            }),
-            ("vertical clicks", {
-                let mut i = noisy_ground(90, 60, 0x1234_5678);
-                for x in [20isize, 40, 60] {
-                    line(&mut i, x, 0, x, 95, 200);
-                }
-                i
-            }),
-            ("line art", {
-                let mut i = blank();
-                circle(&mut i, 48, 48, 30, 240);
-                line(&mut i, 10, 10, 85, 85, 240);
-                line(&mut i, 85, 10, 10, 85, 240);
-                i
-            }),
+    fn drift_search_separates_drawings_from_ambience() {
+        struct Case {
+            name: &'static str,
+            image: Vec<u8>,
+            /// Inclusive bounds on drift, and on the number of distinct lines.
+            drift: (f32, f32),
+            lines: (usize, usize),
+        }
+
+        let cases = vec![
+            Case {
+                name: "noise only",
+                image: noisy_ground(90, 60, 0x1234_5678),
+                drift: (0.0, 0.0),
+                lines: (0, 0),
+            },
+            Case {
+                name: "noise only (2)",
+                image: noisy_ground(90, 60, 0xDEAD_BEEF),
+                drift: (0.0, 0.0),
+                lines: (0, 0),
+            },
+            Case {
+                name: "horizontal tones",
+                image: {
+                    let mut i = noisy_ground(90, 60, 0x1234_5678);
+                    for y in [20usize, 40, 60] {
+                        hline(&mut i, y, 200);
+                    }
+                    i
+                },
+                drift: (0.0, 0.0),
+                lines: (0, 0),
+            },
+            Case {
+                name: "vertical clicks",
+                image: {
+                    let mut i = noisy_ground(90, 60, 0x1234_5678);
+                    for x in [20isize, 40, 60] {
+                        line(&mut i, x, 0, x, 95, 200);
+                    }
+                    i
+                },
+                drift: (0.0, 0.0),
+                lines: (0, 0),
+            },
+            // A single sweep is what ambience produces. It is found — one line —
+            // but one line is not a picture, so it must not score.
+            Case {
+                name: "one faint sweep",
+                image: {
+                    let mut i = noisy_ground(90, 60, 0x1234_5678);
+                    line(&mut i, 0, 10, 95, 80, 150);
+                    i
+                },
+                drift: (0.0, 0.0),
+                lines: (1, 1),
+            },
+            Case {
+                name: "one bright sweep",
+                image: {
+                    let mut i = noisy_ground(90, 60, 0x1234_5678);
+                    line(&mut i, 0, 10, 95, 80, 255);
+                    i
+                },
+                drift: (0.0, 0.0),
+                lines: (1, 1),
+            },
+            // The case the whole pass exists for: strokes far too faint to
+            // become ink, so continuity is blind to them.
+            Case {
+                name: "faint line art",
+                image: {
+                    let mut i = noisy_ground(90, 60, 0x1234_5678);
+                    circle(&mut i, 48, 48, 30, 150);
+                    line(&mut i, 10, 10, 85, 85, 150);
+                    line(&mut i, 85, 10, 10, 85, 150);
+                    i
+                },
+                drift: (0.30, 1.0),
+                lines: (3, 64),
+            },
+            Case {
+                name: "line art",
+                image: {
+                    let mut i = blank();
+                    circle(&mut i, 48, 48, 30, 240);
+                    line(&mut i, 10, 10, 85, 85, 240);
+                    line(&mut i, 85, 10, 10, 85, 240);
+                    i
+                },
+                drift: (0.90, 1.0),
+                lines: (3, 64),
+            },
         ];
-        println!("\n{:<22} {:>7} {:>9} {:>7}", "case", "drift", "angle", "cont");
-        for (name, img) in &cases {
-            let s = analyze(img, W, H);
+
+        println!(
+            "\n{:<20} {:>7} {:>7} {:>9} {:>6} {:>7}",
+            "case", "sigma", "drift", "angle", "lines", "cont"
+        );
+        for case in &cases {
+            let (sigma, _, _) = drift_tile(&case.image, W, H);
+            let (drift, angle, lines) = drift_scan(&case.image, W, H);
+            let continuity = analyze(&case.image, W, H).continuity;
             println!(
-                "{name:<22} {:>7.3} {:>8.1}° {:>7.3}",
-                s.drift, s.drift_angle_deg, s.continuity
+                "{:<20} {sigma:>7.2} {drift:>7.3} {angle:>8.1}° {lines:>6} {continuity:>7.3}",
+                case.name
+            );
+            assert!(
+                drift >= case.drift.0 && drift <= case.drift.1,
+                "{}: drift {drift:.3} outside {:?}",
+                case.name,
+                case.drift
+            );
+            assert!(
+                lines >= case.lines.0 && lines <= case.lines.1,
+                "{}: {lines} lines outside {:?}",
+                case.name,
+                case.lines
             );
         }
         println!();
+
+        // The claim that justifies the pass: a drawing the existing detector
+        // cannot see at all.
+        let faint = &cases
+            .iter()
+            .find(|c| c.name == "faint line art")
+            .unwrap()
+            .image;
+        assert!(
+            analyze(faint, W, H).continuity < 0.1,
+            "faint line art must be invisible to continuity, or this proves nothing"
+        );
+    }
+
+    /// The angle is a measurement, and has to be right to be worth reporting.
+    #[test]
+    fn drift_reports_the_angle_of_the_line_it_found() {
+        // From (0, 10) to (95, 80): 70 rows over 95 columns, which is 36.4
+        // degrees. Rows increase downward, hence the sign.
+        let mut img = noisy_ground(90, 60, 0x1234_5678);
+        line(&mut img, 0, 10, 95, 80, 200);
+        let (_, angle, _) = drift_tile(&img, W, H);
+        assert!(
+            (angle + 36.4).abs() < 4.0,
+            "expected about -36.4 degrees, measured {angle:.1}"
+        );
+
+        // And the steep half, which is found by the transposed pass: 95 rows
+        // over 70 columns is 53.6 degrees.
+        let mut img = noisy_ground(90, 60, 0x1234_5678);
+        line(&mut img, 10, 0, 80, 95, 200);
+        let (_, angle, _) = drift_tile(&img, W, H);
+        assert!(
+            (angle + 53.6).abs() < 4.0,
+            "expected about -53.6 degrees, measured {angle:.1}"
+        );
+    }
+
+    /// Degenerate input must return zero rather than divide by it.
+    #[test]
+    fn drift_handles_flat_and_tiny_images() {
+        assert_eq!(drift_scan(&vec![0u8; W * H], W, H), (0.0, 0.0, 0));
+        assert_eq!(drift_scan(&vec![200u8; W * H], W, H), (0.0, 0.0, 0));
+        assert_eq!(drift_scan(&[0u8; 16], 4, 4), (0.0, 0.0, 0));
+        assert_eq!(drift_scan(&[], 0, 0), (0.0, 0.0, 0));
     }
 
     #[test]
