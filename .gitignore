@@ -30,7 +30,6 @@
 # screenshots land here constantly, and a rule that lists them by name would
 # miss the next one. Anything the project genuinely ships is force-added.
 *.png
-.cl*/
 !/installer/*.png
 !/docs/images/*.png
 
