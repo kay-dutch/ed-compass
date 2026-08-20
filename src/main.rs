@@ -531,10 +531,6 @@ fn run_headless(mut app: App, duration: Option<f32>, export_png: Option<PathBuf>
             println!();
         }
         println!(
-            "Spectral kurtosis (peak over run): {} bins beyond 3 sigma, strongest {:.1} sigma",
-            snap.kurtosis_hot_bins, snap.kurtosis_peak
-        );
-        println!(
             "Drawn structure (final): score {:.3} (coherence {:.2}, sparsity {:.2}, diversity {:.2}){}",
             snap.structure.score,
             snap.structure.coherence,

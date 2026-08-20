@@ -127,9 +127,12 @@ impl SpectralKurtosis {
         let evicting = self.filled == self.window;
         let slot = self.write * bins;
 
-        for i in 0..bins {
-            let p = powers[i];
-            let p = if p.is_finite() && p > 0.0 { p } else { 0.0 } as f64;
+        for (i, &power) in powers.iter().enumerate().take(bins) {
+            let p = if power.is_finite() && power > 0.0 {
+                power as f64
+            } else {
+                0.0
+            };
 
             if evicting {
                 let old = self.ring[slot + i] as f64;
