@@ -217,6 +217,26 @@ pub struct Config {
     /// Independent of the main window: a cockpit strip wants a short, fast view,
     /// not two and a half minutes squeezed into a few hundred pixels.
     pub overlay_spectrogram_seconds: f32,
+    /// Narrow the overlay spectrogram to the band a detection is in.
+    ///
+    /// The overlay strip is short, so a signal a few hundred hertz wide occupies
+    /// a handful of rows of it. The waterfall keeps every bin at full resolution
+    /// and the displayed band is only a render parameter, so narrowing it shows
+    /// detail that was never on screen rather than magnifying what was.
+    #[serde(default = "default_true")]
+    pub overlay_zoom_on_detection: bool,
+    /// How long the zoomed view is kept after the last detection ends.
+    #[serde(default = "default_zoom_hold")]
+    pub overlay_zoom_hold_seconds: f32,
+    /// Minimum time between one zoom movement and the next.
+    ///
+    /// The view is rate-limited rather than event-driven. Ordinary ship ambience
+    /// produces detections every few seconds, and a view that followed each one
+    /// would animate without pause; this is what stops it. Note that it usually
+    /// outlasts `overlay_zoom_hold_seconds`, so it — not the hold — sets how long
+    /// a zoomed view actually lingers.
+    #[serde(default = "default_zoom_lockout")]
+    pub overlay_zoom_lockout_seconds: f32,
     /// Where exported spectrogram images are written. Relative to the working
     /// directory unless absolute.
     pub export_dir: Option<String>,
@@ -275,6 +295,18 @@ pub struct Config {
     pub journal_enabled: bool,
     /// Empty means the default `%USERPROFILE%\Saved Games\...` location.
     pub journal_path: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_zoom_hold() -> f32 {
+    15.0
+}
+
+fn default_zoom_lockout() -> f32 {
+    30.0
 }
 
 impl Default for Config {
@@ -347,6 +379,9 @@ impl Default for Config {
             overlay_height: 104.0,
             overlay_spectrogram: true,
             overlay_spectrogram_seconds: 140.0,
+            overlay_zoom_on_detection: true,
+            overlay_zoom_hold_seconds: 15.0,
+            overlay_zoom_lockout_seconds: 30.0,
             export_dir: None,
             export_width: 8192,
             export_match_published_aspect: true,
@@ -800,6 +835,9 @@ mod tests {
     /// Settings that belong to whoever edited the file. Their defaults may
     /// change, but an existing config keeps whatever it says.
     const USER_OWNED: &[&str] = &[
+        "overlay_zoom_on_detection",
+        "overlay_zoom_hold_seconds",
+        "overlay_zoom_lockout_seconds",
         "device",
         "pcm_ring_seconds",
         "fft_size",

@@ -9,6 +9,7 @@ pub mod controls;
 pub mod events;
 pub mod overlay;
 pub mod waterfall;
+pub mod zoom;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -251,6 +252,9 @@ struct CompassUi {
     last_overlay_render: Instant,
     /// The newest spectrogram pixels, waiting to be handed to the overlay.
     pending_spectrogram: Option<egui::ColorImage>,
+    /// Drives the overlay's displayed frequency band, so a detection is shown at
+    /// a scale where it can be read. See [`zoom`].
+    zoom: zoom::ZoomState,
     /// Width the lamp column needs, measured from the text it draws.
     overlay_label_px: f32,
     /// Whole-window alpha last applied to the overlay, once the Win32 call has
@@ -274,6 +278,15 @@ impl CompassUi {
     fn new(app: App) -> Self {
         let interval = Duration::from_secs_f32(1.0 / app.config().analysis_update_hz.max(1.0));
         let anchor = anchor_from(app.config());
+        let zoom = {
+            let cfg = app.config();
+            zoom::ZoomState::new(
+                zoom::Band::new(cfg.spectrogram_min_hz, cfg.spectrogram_max_hz),
+                cfg.overlay_zoom_hold_seconds,
+                cfg.overlay_zoom_lockout_seconds,
+                Instant::now(),
+            )
+        };
         Self {
             anchor,
             placement: overlay_placement(anchor),
@@ -281,6 +294,7 @@ impl CompassUi {
             overlay_state: Arc::new(Mutex::new(overlay::OverlayState::default())),
             last_overlay_render: Instant::now() - Duration::from_secs(1),
             pending_spectrogram: None,
+            zoom,
             overlay_label_px: 120.0,
             overlay_alpha: None,
             game_found: false,
@@ -801,7 +815,15 @@ impl CompassUi {
     /// analysis produces new rows.
     fn rebuild_overlay_spectrogram(&mut self, _ctx: &egui::Context) {
         let cfg = self.app.config();
-        if !cfg.overlay_spectrogram || self.last_overlay_render.elapsed() < self.snapshot_interval {
+        // Normally there is no point rebuilding faster than the analysis
+        // produces rows. While the band is animating there is: the rows have not
+        // changed, but where they are drawn has.
+        let interval = if self.zoom.animating() {
+            Duration::from_millis(16)
+        } else {
+            self.snapshot_interval
+        };
+        if !cfg.overlay_spectrogram || self.last_overlay_render.elapsed() < interval {
             return;
         }
         let Some(engine) = self.app.engine() else {
@@ -809,11 +831,11 @@ impl CompassUi {
         };
 
         let geometry = engine.geometry();
-        let scale = waterfall::FreqScale::new(
-            cfg.spectrogram_min_hz,
-            cfg.spectrogram_max_hz,
-            geometry.nyquist_hz(),
-        );
+        // The overlay's band is animated; the main window's is not. A cockpit
+        // strip a few hundred pixels tall is where magnification actually buys
+        // something, and the full view is where you go to see everything at once.
+        let band = self.zoom.band(Instant::now());
+        let scale = waterfall::FreqScale::new(band.low_hz, band.high_hz, geometry.nyquist_hz());
         let history = if cfg.spectrogram_show_excess {
             engine.excess_waterfall()
         } else {
@@ -1074,6 +1096,21 @@ impl eframe::App for CompassUi {
         if self.last_snapshot.elapsed() >= self.snapshot_interval {
             self.snapshot = self.app.snapshot();
             self.last_snapshot = Instant::now();
+            let cfg = self.app.config();
+            let active = cfg
+                .overlay_zoom_on_detection
+                .then(|| {
+                    self.snapshot
+                        .as_ref()
+                        .and_then(|s| s.active_band_hz)
+                        .map(|(low, high)| zoom::Band::new(low, high))
+                })
+                .flatten();
+            self.zoom.set_bounds(zoom::Band::new(
+                cfg.spectrogram_min_hz,
+                cfg.spectrogram_max_hz,
+            ));
+            self.zoom.observe(active, Instant::now());
         }
         // The overlay is driven from here, NOT from `ui`, for the same reason
         // `pump` is: `ui` stops running the moment the main window is
@@ -1083,8 +1120,11 @@ impl eframe::App for CompassUi {
         // from egui input, so visibility stays correct even then.
         self.sync_overlay(ctx);
         // Audio keeps arriving whether or not anything moves on screen, so the
-        // window must repaint without waiting for input.
-        ctx.request_repaint_after(Duration::from_millis(33));
+        // window must repaint without waiting for input — and faster than that
+        // while the overlay's band is moving, since a 450 ms animation redrawn
+        // ten times a second is a slideshow rather than a movement.
+        let interval = if self.zoom.animating() { 16 } else { 33 };
+        ctx.request_repaint_after(Duration::from_millis(interval));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

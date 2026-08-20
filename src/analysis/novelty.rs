@@ -428,6 +428,22 @@ impl NoveltyDetector {
         self.open.len()
     }
 
+    /// Frequency span of the events open right now, in Hz.
+    ///
+    /// The events list only gains an entry once an event *closes*, which is too
+    /// late for anything that wants to react while a signal is still arriving —
+    /// a half-minute event would be over before the overlay noticed it. This is
+    /// the same information a frame earlier.
+    pub fn open_event_band(&self) -> Option<(f32, f32)> {
+        let mut low = f32::INFINITY;
+        let mut high = f32::NEG_INFINITY;
+        for e in &self.open {
+            low = low.min(self.geometry.bin_hz(e.low_bin));
+            high = high.max(self.geometry.bin_hz(e.high_bin));
+        }
+        (low.is_finite() && high > low).then_some((low, high))
+    }
+
     pub fn set_ignore_bands(&mut self, bands: &[IgnoreBand]) {
         for (bin, flag) in self.ignored.iter_mut().enumerate() {
             let hz = self.geometry.bin_hz(bin);

@@ -108,6 +108,11 @@ pub struct AnalysisSnapshot {
     pub overrun_count: u64,
     pub warmup_progress: f32,
     pub open_events: usize,
+    /// Frequency span of whatever is being detected right now, in Hz.
+    ///
+    /// Union of every open novelty event. `None` when nothing is live. The
+    /// overlay uses it to decide what band is worth looking at.
+    pub active_band_hz: Option<(f32, f32)>,
     pub is_silent: bool,
 
     // ---- primary detectors ----
@@ -899,6 +904,7 @@ impl AnalysisEngine {
             overrun_count: self.overrun_count,
             warmup_progress: self.detector.background().warmup_progress(),
             open_events: self.detector.open_event_count(),
+            active_band_hz: self.detector.open_event_band(),
             is_silent: stats.is_silent(),
             keying: self.keying(),
             morse: self.morse(),
