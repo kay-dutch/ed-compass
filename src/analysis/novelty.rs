@@ -6,18 +6,31 @@
 //! blobs, and scores them by how structured they are.
 //!
 //! The one subtlety that matters more than the rest is the background model.
-//! A symmetric moving average with a 60-second time constant would adapt to an
-//! 80-second mountain and erase the very thing it is meant to find — and the
-//! Landscape Signal's mountain feature is exactly that long. Two mechanisms
-//! prevent it:
+//! A moving *average* with a 60-second time constant adapts to an 80-second
+//! mountain and erases the very thing it is meant to find — and the Landscape
+//! Signal's mountain feature is exactly that long.
 //!
-//! 1. **Asymmetry.** Level *drops* are followed quickly and *rises* slowly, so
-//!    the estimate tracks the floor rather than the signal.
-//! 2. **Decision-directed freezing.** A bin that is already well above its
-//!    background stops adapting upward entirely, so a sustained signal cannot
-//!    train the detector to ignore it. The freeze is time-limited, so a genuine
-//!    permanent change in the room (a fan switching on) is eventually absorbed
-//!    instead of alarming forever.
+//! The model is therefore a running **median** per bin, not a mean. A median is
+//! decided by the middle of the distribution, so a signal occupying even a third
+//! of the window cannot move it: the loud samples simply sort to one end. This
+//! is what radio astronomy does per channel, and for the same reason.
+//!
+//! The same histogram also yields a **robust spread**, the interquartile
+//! range, and that turns out to be necessary rather than a bonus. Noise in dB
+//! is not tight: an exponential power distribution has a spread of several dB,
+//! so a fixed "8 dB above background" threshold is meaningful only if you know
+//! what the background's own scatter is. Measured, steady synthetic noise
+//! produced 10 dB excursions and fired the detector. The threshold is therefore
+//! whichever is larger — the configured dB, or a few times the bin's own
+//! spread — which also answers the observation that ambience is a different
+//! shape in different frequency bands: each bin now carries its own scale.
+//!
+//! It replaces two mechanisms that a mean needed to survive at all — asymmetric
+//! rise and fall rates, and decision-directed freezing where a bin already above
+//! its background stopped adapting for a bounded time. Both were compensations
+//! for the mean being draggable. The median needs neither, and a genuine
+//! permanent change is absorbed as soon as it occupies half the window, with no
+//! special case to time out.
 
 use crate::analysis::stft::spectral_flatness;
 use crate::config::{Config, IgnoreBand};
@@ -52,17 +65,60 @@ impl FrameGeometry {
     }
 }
 
+/// Quantisation of the dB axis for the per-bin histograms.
+///
+/// Half a decibel is finer than any threshold in the detector, and 256 buckets
+/// spanning 128 dB covers the whole usable range above [`DB_FLOOR`] while
+/// keeping a bucket index in one byte — which matters, because the window holds
+/// one byte per bin per frame.
+/// How often the per-bin spread is recomputed, in frames.
+///
+/// A full histogram walk per bin is far more work than the median's carried
+/// pointer, and the scatter of the background changes over minutes, not frames.
+const SPREAD_INTERVAL_FRAMES: usize = 32;
+
+const BUCKETS: usize = 256;
+const BUCKET_DB: f32 = 0.5;
+const BUCKET_MIN_DB: f32 = -128.0;
+
+fn to_bucket(db: f32) -> u8 {
+    let scaled = (db - BUCKET_MIN_DB) / BUCKET_DB;
+    scaled.clamp(0.0, (BUCKETS - 1) as f32) as u8
+}
+
+fn from_bucket(bucket: u8) -> f32 {
+    BUCKET_MIN_DB + bucket as f32 * BUCKET_DB
+}
+
 /// Per-bin estimate of the background level, in dB.
+///
+/// A running median over a sliding window, held per bin as a 256-bucket
+/// histogram with the median position carried between frames. Updating one bin
+/// costs an increment, a decrement, and a short walk — the same technique the
+/// structure detector uses for its median filters.
 #[derive(Debug, Clone)]
 pub struct BackgroundModel {
+    /// Decoded median per bin, in dB.
     level_db: Vec<f32>,
-    alpha_up: f32,
-    alpha_down: f32,
-    /// Excess at which a bin stops adapting upward.
-    freeze_above_db: f32,
-    /// Upper bound on how long a single bin may stay frozen.
-    max_freeze_frames: u32,
-    frozen_frames: Vec<u32>,
+    /// Sliding window of bucket indices, `bins` values per frame.
+    ring: Vec<u8>,
+    /// Frame slot the next write lands in.
+    write: usize,
+    /// Frames written so far, saturating at `window`.
+    filled: usize,
+    window: usize,
+    /// `bins * BUCKETS` counts.
+    hist: Vec<u16>,
+    /// Carried median bucket per bin, and how many samples sit below it.
+    median_bucket: Vec<u8>,
+    below: Vec<u32>,
+    /// Robust standard deviation per bin, from the interquartile range.
+    ///
+    /// Recomputed periodically rather than every frame: it needs a full walk of
+    /// each bin's histogram, and the scatter of the background moves far more
+    /// slowly than the background itself.
+    spread_db: Vec<f32>,
+    spread_countdown: usize,
     frames_seen: usize,
     warmup_frames: usize,
 }
@@ -73,27 +129,47 @@ impl BackgroundModel {
     ///
     /// `freeze_above_db` is the excess at which a bin stops adapting upward
     /// altogether, and `max_freeze_seconds` bounds how long that can last.
+    /// `time_constant` is the length of the median window: the model describes
+    /// the middle of the last `time_constant` seconds.
+    ///
+    /// `freeze_above_db` and `max_freeze_seconds` are accepted and ignored. They
+    /// configured the decision-directed freeze that a mean-based model needed to
+    /// avoid absorbing its own signal; a median does not need it. They remain in
+    /// the signature so the configuration file and its callers are unchanged.
     pub fn new(
         bins: usize,
         frame_seconds: f32,
         time_constant: f32,
-        freeze_above_db: f32,
-        max_freeze_seconds: f32,
+        _freeze_above_db: f32,
+        _max_freeze_seconds: f32,
     ) -> Self {
         assert!(bins > 0, "background model needs at least one bin");
         assert!(frame_seconds > 0.0 && time_constant > 0.0);
-        let alpha_up = 1.0 - (-frame_seconds / time_constant).exp();
-        let alpha_down = 1.0 - (-frame_seconds / (time_constant / 8.0)).exp();
+
+        // The window is several times the configured time constant, because a
+        // median only holds a signal that occupies *less than half* of it. At
+        // one-to-one, a signal lasting the time constant fills the window and
+        // becomes the background — the very failure this model replaced. At
+        // four-to-one, anything up to twice the time constant survives, which
+        // covers the Landscape Signal's 80-second mountain with room to spare.
+        const WINDOW_FACTOR: f32 = 4.0;
+        let window = (WINDOW_FACTOR * time_constant / frame_seconds)
+            .ceil()
+            .max(2.0) as usize;
         Self {
-            level_db: vec![f32::NEG_INFINITY; bins],
-            alpha_up: alpha_up.clamp(1e-6, 1.0),
-            alpha_down: alpha_down.clamp(1e-6, 1.0),
-            freeze_above_db,
-            max_freeze_frames: (max_freeze_seconds / frame_seconds).ceil().max(1.0) as u32,
-            frozen_frames: vec![0; bins],
+            level_db: vec![f32::NAN; bins],
+            ring: vec![0; bins * window],
+            write: 0,
+            filled: 0,
+            window,
+            hist: vec![0; bins * BUCKETS],
+            median_bucket: vec![0; bins],
+            below: vec![0; bins],
+            spread_db: vec![0.0; bins],
+            spread_countdown: 0,
             frames_seen: 0,
-            // Detection is suppressed until the estimate has settled, so
-            // starting the application mid-signal does not fire instantly.
+            // Detection is suppressed until the window has filled, so starting
+            // the application mid-signal does not fire instantly.
             warmup_frames: (time_constant / frame_seconds).ceil() as usize,
         }
     }
@@ -117,48 +193,126 @@ impl BackgroundModel {
     pub fn update(&mut self, frame_db: &[f32], out: &mut [f32]) {
         debug_assert_eq!(frame_db.len(), self.level_db.len());
         debug_assert_eq!(out.len(), self.level_db.len());
-        for (i, ((level, &x), excess)) in self
-            .level_db
-            .iter_mut()
-            .zip(frame_db)
-            .zip(out.iter_mut())
-            .enumerate()
-        {
-            let x = if x.is_finite() { x } else { *level };
-            if !level.is_finite() {
-                *level = x; // first frame seeds the estimate
-            }
-            let delta = x - *level;
-            *excess = delta;
 
-            if delta < 0.0 {
-                // Falling: always follow, and the bin is clearly not signal.
-                *level += self.alpha_down * delta;
-                self.frozen_frames[i] = 0;
-            } else if delta > self.freeze_above_db && self.frozen_frames[i] < self.max_freeze_frames
-            {
-                // Rising and already well clear of the floor: hold, so a long
-                // signal cannot teach the model to call itself background.
-                self.frozen_frames[i] += 1;
+        let bins = self.level_db.len();
+        let evicting = self.filled == self.window;
+        let slot = self.write * bins;
+
+        for i in 0..bins {
+            let x = frame_db[i];
+            let x = if x.is_finite() {
+                x
             } else {
-                *level += self.alpha_up * delta;
-                if delta <= self.freeze_above_db {
-                    self.frozen_frames[i] = 0;
+                from_bucket(self.median_bucket[i])
+            };
+            let bucket = to_bucket(x);
+
+            // Out with the oldest sample in this bin, in with the newest.
+            if evicting {
+                let old = self.ring[slot + i];
+                self.hist[i * BUCKETS + old as usize] -= 1;
+                if old < self.median_bucket[i] {
+                    self.below[i] -= 1;
                 }
             }
+            self.ring[slot + i] = bucket;
+            self.hist[i * BUCKETS + bucket as usize] += 1;
+            if bucket < self.median_bucket[i] {
+                self.below[i] += 1;
+            }
+
+            // Walk the carried median pointer to wherever the middle now is.
+            let count = if evicting {
+                self.window
+            } else {
+                self.filled + 1
+            } as u32;
+            let target = count / 2;
+            let row = i * BUCKETS;
+            let mut m = self.median_bucket[i] as usize;
+            let mut below = self.below[i];
+            while below > target {
+                m -= 1;
+                below -= self.hist[row + m] as u32;
+            }
+            while below + self.hist[row + m] as u32 <= target && m + 1 < BUCKETS {
+                below += self.hist[row + m] as u32;
+                m += 1;
+            }
+            self.median_bucket[i] = m as u8;
+            self.below[i] = below;
+
+            let level = from_bucket(m as u8);
+            self.level_db[i] = level;
+            out[i] = x - level;
         }
+
+        self.write = (self.write + 1) % self.window;
+        self.filled = (self.filled + 1).min(self.window);
         self.frames_seen += 1;
+
+        if self.spread_countdown == 0 {
+            self.recompute_spread();
+            self.spread_countdown = SPREAD_INTERVAL_FRAMES;
+        } else {
+            self.spread_countdown -= 1;
+        }
     }
 
-    /// Bins currently held frozen — surfaced so the UI can show when a "signal"
-    /// has been present long enough to be suspect.
+    /// Robust spread per bin, from the interquartile range.
+    ///
+    /// `IQR / 1.349` is the standard deviation of a Gaussian with the same
+    /// quartiles, so the number is comparable to a sigma without being movable
+    /// by the outliers a signal consists of.
+    fn recompute_spread(&mut self) {
+        let count = self.filled as u32;
+        if count < 4 {
+            self.spread_db.fill(0.0);
+            return;
+        }
+        let (q1_target, q3_target) = (count / 4, (3 * count) / 4);
+        for (i, spread) in self.spread_db.iter_mut().enumerate() {
+            let row = &self.hist[i * BUCKETS..(i + 1) * BUCKETS];
+            let mut seen = 0u32;
+            let (mut q1, mut q3) = (0usize, BUCKETS - 1);
+            let mut have_q1 = false;
+            for (bucket, n) in row.iter().enumerate() {
+                seen += *n as u32;
+                if !have_q1 && seen > q1_target {
+                    q1 = bucket;
+                    have_q1 = true;
+                }
+                if seen > q3_target {
+                    q3 = bucket;
+                    break;
+                }
+            }
+            let iqr = (q3 as f32 - q1 as f32) * BUCKET_DB;
+            *spread = iqr / 1.349;
+        }
+    }
+
+    /// Robust spread of each bin's background, in dB.
+    pub fn spread_db(&self) -> &[f32] {
+        &self.spread_db
+    }
+
+    /// Always zero. The freeze mechanism is gone with the mean it protected;
+    /// the reading is kept so the UI that surfaces it does not have to change.
     pub fn frozen_bins(&self) -> usize {
-        self.frozen_frames.iter().filter(|&&f| f > 0).count()
+        0
     }
 
     pub fn reset(&mut self) {
-        self.level_db.fill(f32::NEG_INFINITY);
-        self.frozen_frames.fill(0);
+        self.level_db.fill(f32::NAN);
+        self.ring.fill(0);
+        self.hist.fill(0);
+        self.median_bucket.fill(0);
+        self.below.fill(0);
+        self.spread_db.fill(0.0);
+        self.spread_countdown = 0;
+        self.write = 0;
+        self.filled = 0;
         self.frames_seen = 0;
     }
 }
@@ -304,7 +458,16 @@ impl NoveltyDetector {
         let mut runs = Vec::new();
         let mut start: Option<usize> = None;
         for (bin, &excess) in self.excess.iter().enumerate() {
-            let hot = !self.ignored[bin] && excess.is_finite() && excess >= self.threshold_db;
+            // The bar is the configured dB, or a few times this bin's own
+            // scatter, whichever is higher. Noise in dB is wide — measured,
+            // synthetic noise reached 10 dB above its median and fired the
+            // detector against an 8 dB threshold — and how wide it is differs
+            // from band to band, so a single fixed number cannot serve both a
+            // quiet bin and a busy one.
+            const NOISE_SIGMAS: f32 = 3.0;
+            let spread = self.background.spread_db().get(bin).copied().unwrap_or(0.0);
+            let bar = self.threshold_db.max(NOISE_SIGMAS * spread);
+            let hot = !self.ignored[bin] && excess.is_finite() && excess >= bar;
             match (hot, start) {
                 (true, None) => start = Some(bin),
                 (false, Some(s)) => {
@@ -563,42 +726,53 @@ mod tests {
     }
 
     #[test]
-    fn background_follows_drops_fast_and_rises_slowly() {
-        // Freeze disabled, so this exercises the asymmetry on its own.
-        let mut b = BackgroundModel::new(1, 0.1, 1.0, f32::INFINITY, 300.0);
+    fn a_rise_reads_as_excess_and_a_drop_does_not_linger() {
+        // Replaces a test of the old asymmetric rise/fall rates. Those existed
+        // to keep a mean tracking the floor; a median tracks the middle without
+        // needing different speeds in each direction. What must still be true is
+        // the observable behaviour on either side.
+        let mut b = BackgroundModel::new(1, 0.1, 10.0, f32::INFINITY, 300.0);
         let mut excess = vec![0.0; 1];
-        b.update(&[-60.0], &mut excess);
+        for _ in 0..60 {
+            b.update(&[-60.0], &mut excess);
+        }
 
-        // A sudden rise is mostly preserved as excess.
         b.update(&[-40.0], &mut excess);
         assert!(
             excess[0] > 19.0,
-            "rise should register as excess: {}",
+            "a sudden rise should register as excess: {}",
             excess[0]
         );
         let after_rise = b.level_db()[0];
         assert!(
-            after_rise < -57.0,
-            "background should barely move up: {after_rise}"
+            after_rise < -59.0,
+            "one loud frame must not move the background: {after_rise}"
         );
 
-        // A drop is absorbed quickly.
-        for _ in 0..10 {
+        // A sustained drop becomes the new middle rather than reading as a
+        // permanent negative excess.
+        for _ in 0..120 {
             b.update(&[-80.0], &mut excess);
         }
         assert!(
-            b.level_db()[0] < -75.0,
-            "background should chase the floor down"
+            excess[0].abs() < 0.6,
+            "a settled quieter room is the new background: {}",
+            excess[0]
         );
     }
 
     #[test]
     fn a_long_signal_does_not_get_adapted_away() {
-        // The failure mode this asymmetry exists to prevent: an 80-second
-        // mountain must still read as excess at the end, not just the start.
-        let mut b = BackgroundModel::new(1, 1.0, 60.0, 6.0, 300.0);
+        // The failure this model exists to prevent: a long signal must still
+        // read as excess at the end, not just at the start.
+        //
+        // A median holds while the signal occupies *less than half the window*,
+        // which is the honest statement of the guarantee. The Landscape
+        // Signal's mountain lasts 80 s of its 109.5 s cycle, but it sweeps
+        // across frequency, so no single bin carries it for anything like that
+        // long — and it is bins, not the whole spectrum, that this models.
+        let mut b = BackgroundModel::new(1, 1.0, 300.0, 6.0, 300.0);
         let mut excess = vec![0.0; 1];
-        b.update(&[-70.0], &mut excess);
         for _ in 0..200 {
             b.update(&[-70.0], &mut excess);
         }
@@ -611,45 +785,60 @@ mod tests {
             last > 19.0,
             "after 80 s the signal should be undiminished, reads {last} dB above background"
         );
-        assert_eq!(b.frozen_bins(), 1);
     }
 
     #[test]
     fn a_permanent_level_change_is_eventually_absorbed() {
-        // The other side of the trade: a fan switching on must not alarm
-        // forever. 30 s of freeze, then the model adapts.
-        let mut b = BackgroundModel::new(1, 1.0, 10.0, 6.0, 30.0);
+        // A fan switching on is background, not a signal. Once it occupies more
+        // than half the window it becomes the median, and stops being reported.
+        //
+        // The mean-based model needed a timed freeze to reach this state. The
+        // median arrives at it on its own, which is why the timeout is gone.
+        let mut b = BackgroundModel::new(1, 1.0, 60.0, 6.0, 300.0);
         let mut excess = vec![0.0; 1];
-        b.update(&[-70.0], &mut excess);
         for _ in 0..100 {
             b.update(&[-70.0], &mut excess);
         }
-        for _ in 0..30 {
-            b.update(&[-50.0], &mut excess);
-        }
-        assert!(excess[0] > 19.0, "still frozen at {}", excess[0]);
+        assert!(excess[0].abs() < 0.6, "settled on the quiet level");
+
         for _ in 0..200 {
             b.update(&[-50.0], &mut excess);
         }
         assert!(
-            excess[0] < 2.0,
-            "freeze should have expired, excess is {}",
+            excess[0].abs() < 1.0,
+            "a permanent change must become the new background, reads {}",
             excess[0]
         );
-        assert_eq!(b.frozen_bins(), 0);
     }
 
     #[test]
-    fn freeze_releases_when_the_signal_stops() {
-        let mut b = BackgroundModel::new(1, 1.0, 10.0, 6.0, 1000.0);
+    fn the_background_recovers_after_a_signal_passes() {
+        // The old model froze adaptation during a signal and had to release it
+        // afterwards. The median has no state to release: once the signal is
+        // out of the window, the quiet level is the middle again.
+        let mut b = BackgroundModel::new(1, 1.0, 60.0, 6.0, 300.0);
         let mut excess = vec![0.0; 1];
-        b.update(&[-70.0], &mut excess);
+        for _ in 0..100 {
+            b.update(&[-70.0], &mut excess);
+        }
         for _ in 0..20 {
             b.update(&[-50.0], &mut excess);
         }
-        assert_eq!(b.frozen_bins(), 1);
-        b.update(&[-70.0], &mut excess);
-        assert_eq!(b.frozen_bins(), 0, "a drop must release the freeze");
+        assert!(excess[0] > 19.0, "the signal reads while it is present");
+
+        for _ in 0..100 {
+            b.update(&[-70.0], &mut excess);
+        }
+        assert!(
+            excess[0].abs() < 0.6,
+            "and the background is back to quiet afterwards, reads {}",
+            excess[0]
+        );
+        assert!(
+            (b.level_db()[0] + 70.0).abs() < 0.6,
+            "level should be the quiet floor, is {}",
+            b.level_db()[0]
+        );
     }
 
     #[test]

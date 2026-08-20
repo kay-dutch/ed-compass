@@ -8,7 +8,7 @@ description = "Passive detector for hidden signals in Elite Dangerous audio"
 authors = ["A Zimin"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/tbma2014us/ed-compass"
+repository = "https://github.com/kay-dutch/ed-compass"
 keywords = ["elite-dangerous", "spectrogram", "signal", "audio", "overlay"]
 categories = ["multimedia::audio", "games"]
 
