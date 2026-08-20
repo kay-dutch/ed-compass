@@ -72,10 +72,9 @@ coordinates you were at.
 and it lights **blue** to say so. SIGNAL lights **green** — those are the ones
 checked against real reference recordings.
 
-STRUCTURE used to fire on ambience too. It no longer does: sustained tones and
-transients are stripped out before the spectrogram is examined, which took three
-real recordings from 0.67–0.70 down to 0.000 while leaving drawn line art at
-0.98.
+STRUCTURE used to fire on ordinary ambience too. It no longer does — sustained
+tones and broadband transients are stripped out before the spectrogram is
+examined at all, and what ambience is made of is exactly those two things.
 
 ## Is this allowed?
 

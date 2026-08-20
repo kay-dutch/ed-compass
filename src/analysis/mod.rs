@@ -5,6 +5,7 @@
 
 pub mod direction;
 pub mod keying;
+pub mod kurtosis;
 pub mod morse;
 pub mod novelty;
 pub mod periodicity;

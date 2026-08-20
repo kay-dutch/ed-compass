@@ -13,6 +13,7 @@ use realfft::num_complex::Complex32;
 
 use crate::analysis::direction::{self, DirectionEstimate};
 use crate::analysis::keying::{KeyingDetection, KeyingDetector};
+use crate::analysis::kurtosis::{self, SpectralKurtosis};
 use crate::analysis::morse::{MorseDetection, MorseDetector};
 use crate::analysis::novelty::{DetectionEvent, FrameGeometry, NoveltyDetector};
 use crate::analysis::periodicity::{self, PeriodicityResult};
@@ -119,6 +120,10 @@ pub struct AnalysisSnapshot {
     /// from as `(x, y)` in spectrogram pixels.
     pub structure: StructureScore,
     pub structure_tile: (usize, usize),
+    /// Bins whose power distribution is not Gaussian, and the strongest such
+    /// departure in sigmas. Diagnostics for the spectral-kurtosis experiment.
+    pub kurtosis_hot_bins: usize,
+    pub kurtosis_peak: f32,
 }
 
 pub struct AnalysisEngine {
@@ -169,6 +174,12 @@ pub struct AnalysisEngine {
     structure_scanner: Option<StructureScanner>,
     structure: StructureScore,
     structure_tile: (usize, usize),
+    kurtosis: SpectralKurtosis,
+    /// Strongest non-Gaussian departure seen at any point, and how many bins
+    /// were beyond three sigma when it happened. The final frame is a poor
+    /// measurement: a run ending in a silent stretch reports nothing at all.
+    peak_kurtosis: f32,
+    peak_kurtosis_bins: usize,
     /// Best structure score seen, and when.
     ///
     /// The live score describes only the last few seconds. For a recording — or
@@ -297,6 +308,9 @@ impl AnalysisEngine {
             structure_scanner: cfg.detect_structure.then(StructureScanner::default),
             structure: StructureScore::empty(),
             structure_tile: (0, 0),
+            kurtosis: SpectralKurtosis::new(bins, kurtosis::WINDOW_FRAMES),
+            peak_kurtosis: 0.0,
+            peak_kurtosis_bins: 0,
             peak_structure: StructureScore::empty(),
             peak_structure_at: 0.0,
             peak_keying: 0.0,
@@ -546,6 +560,15 @@ impl AnalysisEngine {
                 events
             };
 
+            self.kurtosis.update(&self.mono_powers);
+            if self.kurtosis.ready() {
+                let sigma = self.kurtosis.sigma();
+                let peak = sigma.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+                if peak > self.peak_kurtosis {
+                    self.peak_kurtosis = peak;
+                    self.peak_kurtosis_bins = sigma.iter().filter(|s| s.abs() >= 3.0).count();
+                }
+            }
             self.waterfall.push_db(&self.mono_db);
             {
                 // The detector has already computed this for the current frame.
@@ -904,6 +927,8 @@ impl AnalysisEngine {
             morse: self.morse(),
             structure: self.structure.clone(),
             structure_tile: self.structure_tile,
+            kurtosis_hot_bins: self.peak_kurtosis_bins,
+            kurtosis_peak: self.peak_kurtosis,
         }
     }
 }
