@@ -190,6 +190,16 @@ pub struct AnalysisEngine {
     structure_interval: usize,
     /// Reused scan image: log-spaced frequency rows by time columns.
     scan_image: Vec<u8>,
+    /// The scan image after tones and transients are removed — exactly what the
+    /// structure detector sees, and nothing else exposes it.
+    ///
+    /// Kept because "the score is 0.000 but I can see something" is the hardest
+    /// question this tool asks, and it cannot be answered from the outside: the
+    /// suppression pass removes most of what is on screen by design, so the
+    /// picture a person is looking at and the picture being scored are different
+    /// images.
+    scan_cleaned: Vec<u8>,
+    scan_dims: (usize, usize),
     /// Precomputed bin range feeding each scan row.
     scan_rows: Vec<(usize, usize)>,
 
@@ -310,6 +320,8 @@ impl AnalysisEngine {
             // Every couple of seconds; the drawing is not going anywhere.
             structure_interval: (frames_per_second * 2.0).round().max(1.0) as usize,
             scan_image: Vec::new(),
+            scan_cleaned: Vec::new(),
+            scan_dims: (0, 0),
             scan_rows: log_scan_rows(
                 bins,
                 format.sample_rate,
@@ -685,6 +697,9 @@ impl AnalysisEngine {
                 columns,
                 rows,
             );
+            self.scan_cleaned.clear();
+            self.scan_cleaned.extend_from_slice(&cleaned);
+            self.scan_dims = (columns, rows);
             let (score, x, y) = scanner.scan(&cleaned, columns, rows);
             // Integrating along candidate lines reaches strokes too faint to
             // become ink at all, which the tile sweep above cannot see.
@@ -759,6 +774,17 @@ impl AnalysisEngine {
     }
 
     /// The most recent drawn-structure score.
+    /// Frequency span of the novelty events open right now, in Hz.
+    /// What the structure detector sees: the scan image with sustained tones and
+    /// broadband transients removed, as `(pixels, width, height)`.
+    pub fn scan_cleaned(&self) -> (&[u8], usize, usize) {
+        (&self.scan_cleaned, self.scan_dims.0, self.scan_dims.1)
+    }
+
+    pub fn active_band_hz(&self) -> Option<(f32, f32)> {
+        self.detector.open_event_band()
+    }
+
     pub fn structure(&self) -> &StructureScore {
         &self.structure
     }

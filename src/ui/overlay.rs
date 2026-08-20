@@ -59,6 +59,20 @@ pub fn period_detail(app: &App) -> String {
     }
 }
 
+/// What the lowest rung has to say: the band something was last found in.
+///
+/// The rung exists precisely for things the named detectors cannot describe, so
+/// the honest detail is *where* rather than *what*.
+pub fn anomaly_detail(app: &App) -> String {
+    match app.active_band_hz() {
+        Some((low, high)) if high >= 1000.0 => {
+            format!("{:.1}–{:.1} kHz", low / 1000.0, high / 1000.0)
+        }
+        Some((low, high)) => format!("{low:.0}–{high:.0} Hz"),
+        None => "—".into(),
+    }
+}
+
 /// Text shown under each indicator.
 pub fn detail_lines(app: &App) -> (String, String) {
     let cfg = app.config();
@@ -180,13 +194,13 @@ pub fn label_column_width(ctx: &egui::Context, state: &OverlayState) -> f32 {
     };
 
     let mut needed: f32 = 0.0;
-    for label in ["SIGNAL", "TRANSMIT", "STRUCTURE"] {
+    for label in ["SIGNAL", "CYPHER", "ANOMALY"] {
         needed = needed.max(width_of(label, 11.0));
     }
     for detail in [
-        &state.period_detail,
-        &state.keying_detail,
-        &state.structure_detail,
+        &state.signal_detail,
+        &state.cypher_detail,
+        &state.anomaly_detail,
     ] {
         needed = needed.max(width_of(detail, 9.0));
     }
@@ -222,6 +236,51 @@ impl OverlayAttention {
 /// be `Send + Sync`, so it cannot hold a reference to the application. Copying
 /// the handful of values it needs is both cheaper and simpler than the
 /// alternatives.
+/// How far the evidence goes, lowest rung first.
+///
+/// The three lamps used to name three *categories* — a period match, keying, a
+/// drawing — which meant the overlay went dark whenever the detectors found
+/// something they could not put in one of those boxes. That is the worst
+/// possible failure for a tool whose whole purpose is finding signals nobody has
+/// catalogued: it stayed silent for exactly the case it exists for, while the
+/// main window said ANOMALY.
+///
+/// So the lamps are a **ladder of confidence** instead, and each rung is
+/// strictly stronger evidence than the one below:
+///
+/// | rung | what it means |
+/// |---|---|
+/// | `Anomaly` | something departed from the learned background |
+/// | `Cypher` | it carries deliberate structure — keyed, or drawn |
+/// | `Signal` | it matches something we can name |
+///
+/// They light cumulatively, so the display reads as a bar filling rather than as
+/// three independent claims. `Signal` implies `Cypher` implies `Anomaly` by
+/// construction, whether or not each underlying detector happens to be firing
+/// this instant — a recognised signal is an encoded one, and an encoded one is a
+/// departure from noise.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Rung {
+    Anomaly,
+    Cypher,
+    Signal,
+}
+
+impl Rung {
+    /// Highest rung the evidence reaches, if any.
+    pub fn of(anomaly: bool, cypher: bool, signal: bool) -> Option<Self> {
+        if signal {
+            Some(Self::Signal)
+        } else if cypher {
+            Some(Self::Cypher)
+        } else if anomaly {
+            Some(Self::Anomaly)
+        } else {
+            None
+        }
+    }
+}
+
 /// Everything the overlay draws.
 ///
 /// `Default` deliberately paints nothing: the shared cell is created before the
@@ -230,13 +289,15 @@ impl OverlayAttention {
 /// launch.
 #[derive(Clone, Default)]
 pub struct OverlayState {
-    pub landscape: bool,
-    pub keying: bool,
+    /// Highest rung the evidence reaches. `None` means nothing found.
+    pub rung: Option<Rung>,
+    /// Keying is firing while music plays, so the reading is suspect. Colours
+    /// the CYPHER rung amber rather than clearing it — "this looks like music"
+    /// is worth more than "something is encoded".
     pub keying_suspect: bool,
-    pub structure: bool,
-    pub period_detail: String,
-    pub keying_detail: String,
-    pub structure_detail: String,
+    pub anomaly_detail: String,
+    pub cypher_detail: String,
+    pub signal_detail: String,
     /// Pixels for the spectrogram, when the parent has produced a new frame.
     ///
     /// Deliberately an image and not a `TextureHandle`: a texture allocated in
@@ -264,14 +325,21 @@ impl OverlayState {
     pub fn from_app(app: &App) -> Self {
         let (keying, structure) = app.detections_present();
         let (keying_detail, structure_detail) = detail_lines(app);
+        let signal = app.signal_present();
+        let cypher = keying || structure;
+        let anomaly = matches!(app.status(), crate::app::Status::Anomaly);
+        // Whichever of the two is actually firing gets to describe the rung.
+        let cypher_detail = if keying {
+            keying_detail
+        } else {
+            structure_detail
+        };
         Self {
-            landscape: app.signal_present(),
-            keying,
+            rung: Rung::of(anomaly, cypher, signal),
             keying_suspect: app.keying_suspect(),
-            structure,
-            period_detail: period_detail(app),
-            keying_detail,
-            structure_detail,
+            anomaly_detail: anomaly_detail(app),
+            cypher_detail,
+            signal_detail: period_detail(app),
             spectrogram: None,
             // Set by the caller, which owns the visibility decision.
             showing: false,
@@ -287,7 +355,7 @@ impl OverlayState {
 /// the spectrogram has to occupy the window's full height exactly — a stacked
 /// layout left most of the panel empty, which is what it was replaced for.
 pub fn overlay(ui: &mut egui::Ui, state: &OverlayState, spectrogram: Option<&egui::TextureHandle>) {
-    let anything = state.landscape || state.keying || state.structure;
+    let anything = state.rung.is_some();
 
     let rect = ui.max_rect();
     let painter = ui.painter().clone();
@@ -355,20 +423,27 @@ pub fn overlay(ui: &mut egui::Ui, state: &OverlayState, spectrogram: Option<&egu
         )
     };
 
+    // Read top-down as a ladder: SIGNAL at the top is the strongest claim, and
+    // the lamps below it stay lit, so the display fills upward rather than
+    // showing three unrelated verdicts.
+    //
+    // "SIGNAL" names no particular signal: the Landscape is simply the first
+    // periodic transmission anyone found, and the rung is for whatever we can
+    // identify. The detail line names the match when there is one.
+    let reached = state.rung;
+    let lit = |r: Rung| reached.is_some_and(|got| got >= r);
+
     hud_lamp(
         &painter,
         row(0.0),
-        // "SIGNAL", not the name of any one signal: the Landscape is simply
-        // the first periodic transmission anyone has found, and the lamp is for
-        // whatever repeats. The detail line names the match when there is one.
         "SIGNAL",
-        &state.period_detail,
-        state.landscape,
+        &state.signal_detail,
+        lit(Rung::Signal),
         hud::GREEN,
     );
-    // Amber still overrides for a suspect detection: "this looks like music"
-    // is worth more than "something is keying".
-    let keying_colour = if state.keying_suspect {
+    // Amber overrides for a suspect detection: "this looks like music" is worth
+    // more than "something is encoded".
+    let cypher_colour = if state.keying_suspect {
         hud::AMBER
     } else {
         hud::BLUE
@@ -376,18 +451,22 @@ pub fn overlay(ui: &mut egui::Ui, state: &OverlayState, spectrogram: Option<&egu
     hud_lamp(
         &painter,
         row(1.0),
-        "TRANSMIT",
-        &state.keying_detail,
-        state.keying,
-        keying_colour,
+        "CYPHER",
+        &state.cypher_detail,
+        lit(Rung::Cypher),
+        cypher_colour,
     );
+    // The bottom rung is deliberately the quietest colour on the panel. It is
+    // lit a great deal — ordinary ship ambience produces a departure every
+    // twenty seconds or so — and a bright lamp that is usually on teaches you to
+    // ignore the panel. What carries information is how far up the ladder goes.
     hud_lamp(
         &painter,
         row(2.0),
-        "STRUCTURE",
-        &state.structure_detail,
-        state.structure,
-        hud::BLUE,
+        "ANOMALY",
+        &state.anomaly_detail,
+        lit(Rung::Anomaly),
+        hud::AMBER,
     );
 }
 
@@ -585,9 +664,9 @@ mod tests {
         let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
 
         let mut state = OverlayState {
-            period_detail: "109.7s conf 0.98".into(),
-            keying_detail: "22050 Hz · 123.4/s".into(),
-            structure_detail: "0.34".into(),
+            signal_detail: "109.7s conf 0.98".into(),
+            cypher_detail: "22050 Hz · 123.4/s".into(),
+            anomaly_detail: "0.34".into(),
             ..Default::default()
         };
         let wide = label_column_width(&ctx, &state);
@@ -608,15 +687,63 @@ mod tests {
         assert!(wide <= 18.0 + text + 30.0, "{wide} px is dead space");
 
         // Short details give a narrower column — that width is the whole point.
-        state.period_detail = "0.11".into();
-        state.keying_detail = "0.52".into();
+        state.signal_detail = "0.11".into();
+        state.cypher_detail = "0.52".into();
         let narrow = label_column_width(&ctx, &state);
         assert!(narrow < wide, "narrow {narrow} should beat wide {wide}");
 
         // And it never collapses below the fixed labels.
-        state.structure_detail = String::new();
+        state.anomaly_detail = String::new();
         let bare = label_column_width(&ctx, &state);
-        assert!(bare >= 18.0 + 55.0, "must still fit STRUCTURE, got {bare}");
+        assert!(bare >= 18.0 + 40.0, "must still fit ANOMALY, got {bare}");
+    }
+
+    /// The property the whole design rests on: the lamps fill upward, and a
+    /// higher rung can never be lit while a lower one is dark.
+    #[test]
+    fn the_ladder_is_monotonic() {
+        // Every combination of what the detectors might be saying.
+        for signal in [false, true] {
+            for cypher in [false, true] {
+                for anomaly in [false, true] {
+                    let rung = Rung::of(anomaly, cypher, signal);
+                    let lit = |r: Rung| rung.is_some_and(|got| got >= r);
+                    if lit(Rung::Signal) {
+                        assert!(lit(Rung::Cypher), "SIGNAL lit with CYPHER dark");
+                    }
+                    if lit(Rung::Cypher) {
+                        assert!(lit(Rung::Anomaly), "CYPHER lit with ANOMALY dark");
+                    }
+                    assert_eq!(
+                        rung.is_some(),
+                        anomaly || cypher || signal,
+                        "a lamp must light for any evidence at all"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The failure that prompted the redesign: the main window said ANOMALY
+    /// while every overlay lamp stayed dark, which from a cockpit is
+    /// indistinguishable from the tool being broken.
+    #[test]
+    fn an_unnamed_anomaly_still_lights_the_panel() {
+        let rung = Rung::of(true, false, false);
+        assert_eq!(rung, Some(Rung::Anomaly));
+        assert!(
+            rung.is_some(),
+            "the panel must not go dark on a real detection"
+        );
+    }
+
+    /// A recognised signal reaches the top whether or not the lower detectors
+    /// happen to be firing this instant.
+    #[test]
+    fn a_named_signal_reaches_the_top_rung_alone() {
+        assert_eq!(Rung::of(false, false, true), Some(Rung::Signal));
+        assert_eq!(Rung::of(false, true, false), Some(Rung::Cypher));
+        assert_eq!(Rung::of(false, false, false), None);
     }
 
     #[test]

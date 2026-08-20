@@ -374,6 +374,8 @@ pub struct NoveltyDetector {
     gap_frames: usize,
     /// Bins excluded by the configured ignore bands.
     ignored: Vec<bool>,
+    detect_min_hz: f32,
+    detect_max_hz: f32,
     open: Vec<OpenEvent>,
     frame_index: u64,
     excess: Vec<f32>,
@@ -400,6 +402,17 @@ impl NoveltyDetector {
             min_frames: geometry.seconds_to_frames(cfg.min_event_seconds),
             gap_frames: geometry.seconds_to_frames(cfg.event_gap_tolerance_seconds),
             ignored: vec![false; bins],
+            // The band the detector is *told* to watch.
+            //
+            // This was missing entirely, and the omission was invisible because
+            // every other consumer of the setting honoured it: the structure
+            // scan is built from these bounds and so is the direction finder,
+            // while novelty detection quietly ran from DC to Nyquist. In the
+            // field that meant a detection reported at 4.4–6.7 kHz on a
+            // configuration whose band ends at 2600 Hz, and a capture folder
+            // holding a gigabyte of ship noise.
+            detect_min_hz: cfg.detect_min_hz,
+            detect_max_hz: cfg.detect_max_hz,
             open: Vec::new(),
             frame_index: 0,
             excess: vec![0.0; bins],
@@ -444,10 +457,21 @@ impl NoveltyDetector {
         (low.is_finite() && high > low).then_some((low, high))
     }
 
+    /// Recompute which bins are excluded from detection.
+    ///
+    /// Two reasons a bin is excluded, and both have to be applied here: it falls
+    /// outside the configured detection band, or it sits inside a band the user
+    /// has muted. Applying the detect band anywhere else would not survive this
+    /// function, which rewrites the whole mask.
+    ///
+    /// Note this suppresses *detection* only. The background model still tracks
+    /// every bin, so the excess display and the spectrogram are unaffected.
     pub fn set_ignore_bands(&mut self, bands: &[IgnoreBand]) {
+        let (lo, hi) = (self.detect_min_hz, self.detect_max_hz);
         for (bin, flag) in self.ignored.iter_mut().enumerate() {
             let hz = self.geometry.bin_hz(bin);
-            *flag = bands.iter().any(|b| b.contains(hz));
+            let out_of_band = hz < lo || hz > hi;
+            *flag = out_of_band || bands.iter().any(|b| b.contains(hz));
         }
     }
 
@@ -698,7 +722,59 @@ mod tests {
         c.background_time_constant_seconds = 1.0;
         c.min_event_seconds = 0.2;
         c.event_gap_tolerance_seconds = 0.1;
+        // These tests are about event mechanics — drift, dropouts, merging — and
+        // use a tone at 4687 Hz. The band is opened explicitly so that intent
+        // stays visible: with the shipped 180–2600 Hz band they would be testing
+        // the band filter by accident, which is what `band_limits` is for.
+        c.detect_min_hz = 0.0;
+        c.detect_max_hz = GEOM.nyquist_hz();
         c
+    }
+
+    /// Bins outside the configured band must not produce detections.
+    ///
+    /// This is the bug that shipped: `detect_min_hz` and `detect_max_hz` shaped
+    /// the structure scan and the direction finder, while novelty detection ran
+    /// across the whole spectrum. In the field it reported an event at
+    /// 4.4–6.7 kHz on a configuration whose band ends at 2600 Hz, and filled a
+    /// gigabyte of disk with ship noise.
+    #[test]
+    fn detection_is_confined_to_the_configured_band() {
+        let mut c = cfg();
+        c.detect_min_hz = 500.0;
+        c.detect_max_hz = 2_000.0;
+        let mut d = NoveltyDetector::new(GEOM, &c);
+        warm_up(&mut d);
+
+        // 4687 Hz, far above the band, and very loud.
+        let mut out_of_band = flat_frame(-90.0);
+        out_of_band[100] = -20.0;
+        for _ in 0..200 {
+            assert!(
+                d.push_frame(&out_of_band, &flat_powers()).is_empty(),
+                "a 70 dB excess outside the band must not detect"
+            );
+        }
+        assert_eq!(d.open_event_count(), 0, "nor open an event");
+
+        // Below the band, equally loud.
+        let mut too_low = flat_frame(-90.0);
+        too_low[2] = -20.0; // ~94 Hz
+        for _ in 0..200 {
+            assert!(d.push_frame(&too_low, &flat_powers()).is_empty());
+        }
+        assert_eq!(d.open_event_count(), 0);
+
+        // And inside it, the same excess is found.
+        let mut in_band = flat_frame(-90.0);
+        in_band[20] = -20.0; // 937 Hz
+        for _ in 0..20 {
+            d.push_frame(&in_band, &flat_powers());
+        }
+        assert!(
+            d.open_event_count() > 0,
+            "the band it was told to watch must still work"
+        );
     }
 
     fn flat_frame(db: f32) -> Vec<f32> {

@@ -6,7 +6,7 @@
 //! That is what keeps the display rate independent of the capture rate, and it
 //! lets the headless mode and the GUI share one implementation.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -94,6 +94,14 @@ pub struct App {
     engine: Option<AnalysisEngine>,
     journal: Option<JournalWatcher>,
     writer: CaptureWriter,
+    /// When the last capture was written, and where.
+    ///
+    /// Export consults this before writing. A capture from moments ago already
+    /// contains the moment being asked about — the spans are longer than the gap
+    /// — so writing a second copy would spend a hundred and fifty seconds of
+    /// disk to save what is already saved, and telling someone their audio
+    /// "failed" when it is sitting on disk is worse than either.
+    last_capture: Option<(Instant, PathBuf)>,
     disk_usage: DiskUsage,
     disk_usage_at: Option<Instant>,
 
@@ -150,6 +158,7 @@ impl App {
 
         Self {
             writer: CaptureWriter::new(capture_dir, &cfg),
+            last_capture: None,
             disk_usage: DiskUsage::default(),
             disk_usage_at: None,
             cfg,
@@ -261,6 +270,15 @@ impl App {
     }
 
     /// Whether each primary detector currently reports something present.
+    /// Frequency span of whatever is being detected right now, if anything.
+    ///
+    /// The overlay's lowest rung reports where something was found rather than
+    /// what it was, because the whole point of that rung is things the named
+    /// detectors cannot describe.
+    pub fn active_band_hz(&self) -> Option<(f32, f32)> {
+        self.engine.as_ref().and_then(|e| e.active_band_hz())
+    }
+
     pub fn detections_present(&self) -> (bool, bool) {
         (self.keying_present, self.structure_present)
     }
@@ -338,7 +356,7 @@ impl App {
             } else {
                 "structure"
             };
-            if let Err(e) = self.keep_recent(self.cfg.detector_capture_seconds, reason) {
+            if let Err(e) = self.keep_recent(self.cfg.detector_capture_seconds, reason, false) {
                 log::warn!("could not keep the detected audio: {e:#}");
             }
         }
@@ -349,21 +367,26 @@ impl App {
 
     /// Write the most recent `seconds` of audio to disk with a sidecar.
     ///
-    /// This is what the "keep" button calls, and what a detector firing calls.
-    /// Subject to the same cooldown and hourly cap as every other capture, so it
-    /// cannot fill the disk.
-    pub fn keep_recent(&mut self, seconds: f32, reason: &str) -> Result<PathBuf> {
+    /// `forced` skips the cooldown and the hourly cap. Those exist to stop the
+    /// *detectors* filling the disk while nobody is watching; a person pressing
+    /// Export is not that. Applied to a deliberate action they refuse the one
+    /// moment somebody actually wanted — which is exactly what happened the first
+    /// time this was tried in the field, on a signal that was visible on screen
+    /// and is now gone. The disk budget still applies, so this cannot run away.
+    pub fn keep_recent(&mut self, seconds: f32, reason: &str, forced: bool) -> Result<PathBuf> {
         let engine = self
             .engine
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no stream yet"))?;
 
         let now = Instant::now();
-        // A score of 1.0 clears the threshold; this is an explicit decision to
-        // keep, not a scored guess.
-        let decision = self.writer.evaluate(1.0, now);
-        if !decision.accepted() {
-            anyhow::bail!("declined ({decision:?})");
+        if !forced {
+            // A score of 1.0 clears the threshold; what is being tested here is
+            // the rate limiting, not the evidence.
+            let decision = self.writer.evaluate(1.0, now);
+            if !decision.accepted() {
+                anyhow::bail!("declined ({decision:?})");
+            }
         }
 
         let format = engine.ring_format();
@@ -412,8 +435,24 @@ impl App {
                 .is_some_and(|p| crate::analysis::periodicity::matches_landscape(p, 2.0)),
         };
 
-        self.writer
-            .write_span(&samples, &format, &device, &game, sidecar, now)
+        let written = self
+            .writer
+            .write_span(&samples, &format, &device, &game, sidecar, now);
+        if let Ok(path) = &written {
+            self.last_capture = Some((now, path.clone()));
+        }
+        written
+    }
+
+    /// A capture written within `within`, if there is one.
+    ///
+    /// Used by Export to report what is already on disk rather than duplicating
+    /// it. Detector captures count: they are the same audio.
+    pub fn recent_capture(&self, within: std::time::Duration) -> Option<&Path> {
+        self.last_capture
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() <= within)
+            .map(|(_, p)| p.as_path())
     }
 
     pub fn config(&self) -> &Config {
@@ -815,6 +854,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::audio::SampleFormat;
     use crate::audio::capture::start_synthetic;

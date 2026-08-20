@@ -82,14 +82,20 @@ fn row(ui: &mut egui::Ui, record: &EventRecord) {
         ui.label(egui::RichText::new(format!("{:>6.1}s", e.duration_seconds)).monospace());
         ui.label(egui::RichText::new(format!("{:>6.1}dB", e.peak_excess_db)).monospace());
 
+        // The score is the only number in this row that says how interesting the
+        // event is, so it is the only one given emphasis. The bearing used to
+        // carry it, coloured by *its own* confidence — which stereo pan law
+        // reports as 1.00 whenever a source is centred, meaning the brightest
+        // thing in every row was a constant.
         let score_colour = if e.score >= 0.6 {
             egui::Color32::from_rgb(255, 210, 90)
         } else {
-            egui::Color32::from_gray(170)
+            egui::Color32::from_gray(120)
         };
         ui.label(
             egui::RichText::new(format!("{:.2}", e.score))
                 .monospace()
+                .strong()
                 .color(score_colour),
         );
 
@@ -104,7 +110,7 @@ fn row(ui: &mut egui::Ui, record: &EventRecord) {
                 )
             ))
             .monospace()
-            .color(super::compass::confidence_colour(d.confidence)),
+            .color(egui::Color32::from_gray(130)),
         );
 
         ui.label(

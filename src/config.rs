@@ -37,7 +37,13 @@ impl IgnoreBand {
 ///    marked migrated without being touched.
 /// 4: shifted 220 px right — flush in the corner covered Elite's own info
 ///    icons. Size unchanged.
-pub const OVERLAY_LAYOUT_REVISION: u32 = 6;
+/// 7: direction finding off again. Measured across a full session on a stereo
+///    headphone endpoint, all 48 usable bearings read +0.00 degrees at
+///    confidence 1.00 — one distinct value, for eight transforms per frame and
+///    a ring holding every channel. Elite does not pan the signals this tool
+///    hunts, so pan law reports centre forever. Still worth turning on for a
+///    real 7.1 endpoint, which is a different measurement.
+pub const OVERLAY_LAYOUT_REVISION: u32 = 7;
 
 /// Whether files can actually be created in a directory.
 ///
@@ -119,9 +125,18 @@ pub struct Config {
     // ---- what to compute ----
     /// Estimate a bearing from inter-channel differences.
     ///
-    /// Off by default. It costs one FFT per channel per frame instead of one
-    /// total, and forces the PCM ring to hold every channel — together the
-    /// dominant cost of the application. The presence detectors do not need it.
+    /// Off by default, and the reason is measured rather than assumed. It costs
+    /// one FFT per channel per frame instead of one total, and forces the PCM
+    /// ring to hold every channel — together the dominant cost of the
+    /// application, and on a 7.1 endpoint the difference between 220 MB of ring
+    /// and 27 MB. Against that, a full session on a stereo headphone endpoint
+    /// produced 48 bearings with **one distinct value**: +0.00 degrees at
+    /// confidence 1.00, every time. Elite does not pan the ambient signals this
+    /// tool hunts, and stereo pan law reports centre for anything unpanned.
+    ///
+    /// Worth enabling on a genuine 7.1 endpoint, where the method is not
+    /// restricted to pan law — see the reference for the procedure. It also
+    /// decides what gets *recorded*: with this off, captures are mono.
     pub direction_finding: bool,
     /// Detect binary keying: alternation between a small set of discrete tones,
     /// as used by the Thargoid Probe tightbeam.
@@ -341,7 +356,7 @@ impl Default for Config {
             // On by default: the measurement says a stereo endpoint pays 0.04
             // percentage points of one core and 27 MB for it, which is not a
             // price worth making anyone opt into.
-            direction_finding: true,
+            direction_finding: false,
             detect_keying: true,
             detect_structure: true,
             // Raised from 0.85 after measurement: ship ambience at Eratosthenes
@@ -496,9 +511,10 @@ impl Config {
         self.overlay_x_fraction = d.overlay_x_fraction;
         self.overlay_y_fraction = d.overlay_y_fraction;
         self.overlay_x_offset_px = d.overlay_x_offset_px;
-        // Not geometry, but it decides whether the overlay has a bearing rose
-        // at all — and a value of `false` in an existing file came from the old
-        // default, not from anyone choosing it.
+        // Not geometry, but it decides whether the overlay has a bearing rose at
+        // all, and it is the most expensive setting in the file. A value carried
+        // over from an older default was never anyone's choice, so the migration
+        // takes it too.
         self.direction_finding = d.direction_finding;
         self.overlay_fit_between_plotters = d.overlay_fit_between_plotters;
         self.overlay_width = d.overlay_width;

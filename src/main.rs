@@ -137,6 +137,11 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     export_png: Option<PathBuf>,
 
+    /// Write what the *structure detector* sees — the scan image after tones and
+    /// transients are removed — to this PNG. Headless only.
+    #[arg(long, value_name = "PATH")]
+    export_scan: Option<PathBuf>,
+
     /// More logging. Repeat for more still.
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -225,6 +230,21 @@ fn install_shortcuts() -> Result<()> {
     Ok(())
 }
 
+/// Write a single-channel image as a greyscale PNG.
+fn write_gray_png(
+    path: &std::path::Path,
+    pixels: &[u8],
+    w: usize,
+    h: usize,
+) -> std::io::Result<()> {
+    let file = std::fs::File::create(path)?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
+    encoder.set_color(png::ColorType::Grayscale);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header()?.write_image_data(pixels)?;
+    Ok(())
+}
+
 #[cfg(not(windows))]
 fn install_shortcuts() -> Result<()> {
     bail!("Desktop shortcuts are a Windows feature")
@@ -305,7 +325,12 @@ fn build_app(cli: &Cli, cfg: Config, capture_dir: PathBuf) -> Result<App> {
 }
 
 /// Console mode: pump, report detections, exit on duration or end of input.
-fn run_headless(mut app: App, duration: Option<f32>, export_png: Option<PathBuf>) -> Result<()> {
+fn run_headless(
+    mut app: App,
+    duration: Option<f32>,
+    export_png: Option<PathBuf>,
+    export_scan: Option<PathBuf>,
+) -> Result<()> {
     // Read the configured thresholds rather than repeating literals here, or the
     // console disagrees with the UI about what counts as a detection.
     let keying_threshold = app.config().keying_threshold;
@@ -445,6 +470,23 @@ fn run_headless(mut app: App, duration: Option<f32>, export_png: Option<PathBuf>
         ) {
             Ok(()) => println!("Exported {}", path.display()),
             Err(e) => eprintln!("could not export: {e}"),
+        }
+    }
+
+    // What the structure detector actually scored, as opposed to what is on
+    // screen. The two are different images by design, and when the score
+    // disagrees with your eyes this is the only way to see which is right.
+    if let Some(path) = export_scan
+        && let Some(engine) = app.engine()
+    {
+        let (pixels, w, h) = engine.scan_cleaned();
+        if w == 0 || h == 0 {
+            eprintln!("no scan image yet — the run was too short");
+        } else {
+            match write_gray_png(&path, pixels, w, h) {
+                Ok(()) => println!("Exported the detector's view: {} ({w}x{h})", path.display()),
+                Err(e) => eprintln!("could not export the scan: {e}"),
+            }
         }
     }
 
@@ -696,7 +738,12 @@ fn main() -> Result<()> {
     let app = build_app(&cli, cfg, capture_dir)?;
 
     let result = if cli.headless {
-        run_headless(app, cli.duration, cli.export_png.clone())
+        run_headless(
+            app,
+            cli.duration,
+            cli.export_png.clone(),
+            cli.export_scan.clone(),
+        )
     } else {
         let backend = cli
             .renderer

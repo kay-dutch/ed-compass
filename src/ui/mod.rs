@@ -11,6 +11,7 @@ pub mod overlay;
 pub mod waterfall;
 pub mod zoom;
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -272,6 +273,9 @@ struct CompassUi {
     last_waterfall: Instant,
     /// Size the waterfall image was last built at, so it is rebuilt on resize.
     waterfall_size: [usize; 2],
+    /// What the last Export did, shown next to the button. A log line is no use
+    /// to someone in a cockpit who needs to know the moment was saved.
+    export_status: Option<String>,
 }
 
 impl CompassUi {
@@ -312,6 +316,7 @@ impl CompassUi {
             waterfall_texture: None,
             last_waterfall: Instant::now() - Duration::from_secs(1),
             waterfall_size: [0, 0],
+            export_status: None,
         }
     }
 
@@ -372,14 +377,15 @@ impl CompassUi {
                 self.app.set_show_excess(excess);
             }
             if ui
-                .button("export PNG")
+                .button("Export")
                 .on_hover_text(
-                    "Write the spectrogram at 4096x1600 for comparison against \
-                     published decodes.",
+                    "Keep everything about this moment: the recent audio, and the \
+                     spectrogram as an image. Use it the instant you see something, \
+                     whether or not the lamps agree.",
                 )
                 .clicked()
             {
-                self.export_spectrogram();
+                self.export_everything();
             }
 
             ui.separator();
@@ -628,15 +634,8 @@ impl CompassUi {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button("Keep last 60 s")
-                    .on_hover_text("Write the recent audio to the captures folder right now.")
-                    .clicked()
-                {
-                    match self.app.keep_recent(60.0, "manual") {
-                        Ok(path) => log::info!("kept {}", path.display()),
-                        Err(e) => log::warn!("could not keep audio: {e:#}"),
-                    }
+                if let Some(status) = &self.export_status {
+                    ui.label(egui::RichText::new(status).weak());
                 }
             });
         });
@@ -870,10 +869,8 @@ impl CompassUi {
     /// The on-screen view is limited to the window; the published decodes were
     /// read at far higher resolution, which is the difference between seeing a
     /// mountain and seeing a smear.
-    fn export_spectrogram(&mut self) {
-        let Some(engine) = self.app.engine() else {
-            return;
-        };
+    fn export_spectrogram(&mut self) -> Option<PathBuf> {
+        let engine = self.app.engine()?;
         let geometry = engine.geometry();
         let cfg = self.app.config();
         let scale = waterfall::FreqScale::new(
@@ -891,7 +888,7 @@ impl CompassUi {
         let dir = std::path::Path::new(&self.export_dir);
         if let Err(e) = std::fs::create_dir_all(dir) {
             log::error!("could not create {}: {e}", dir.display());
-            return;
+            return None;
         }
 
         // Named by where it was taken, then when — so a folder of exports sorts
@@ -908,6 +905,7 @@ impl CompassUi {
             if show_excess { "-excess" } else { "-raw" }
         );
         let path = dir.join(name);
+        let mut written = None;
         let window_frames = (cfg.waterfall_seconds / geometry.frame_seconds())
             .ceil()
             .max(1.0) as usize;
@@ -926,6 +924,7 @@ impl CompassUi {
         ) {
             Ok(()) => {
                 log::info!("exported {}", path.display());
+                written = Some(path.clone());
                 // Exports are renderings of data still held elsewhere, so they
                 // are trimmed oldest-first with no ranking. Without this they
                 // are the one thing on disk with no ceiling at all.
@@ -937,6 +936,44 @@ impl CompassUi {
             }
             Err(e) => log::error!("could not export the spectrogram: {e}"),
         }
+        written
+    }
+
+    /// Write the audio *and* the picture, on one press.
+    ///
+    /// These were two buttons in two different rows, which is one too many for
+    /// the moment they exist for: something is on screen that should not be, and
+    /// whatever is kept now is all anyone will ever have of it. Sound and image
+    /// answer different questions — the image shows what the detectors saw, the
+    /// audio can be re-run through them with different thresholds — and needing
+    /// both is the normal case, not the careful one.
+    fn export_everything(&mut self) {
+        // As much as the ring holds, not an arbitrary minute. The Landscape
+        // Signal's cycle alone is 109.5 s, and a dump too short to contain one
+        // cannot answer anything about it afterwards.
+        let seconds = self.app.config().pcm_ring_seconds;
+        let mut why = String::new();
+        let audio: Option<PathBuf> = match self.app.keep_recent(seconds, "manual", true) {
+            Ok(path) => Some(path),
+            Err(e) => {
+                log::warn!("could not keep audio: {e:#}");
+                why = format!(" ({e})");
+                None
+            }
+        };
+        let png = self.export_spectrogram();
+        self.export_status = Some(match (audio, png) {
+            (Some(a), Some(_)) => format!(
+                "exported {:.0} s of audio and the spectrogram to {}",
+                seconds,
+                a.parent()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_default()
+            ),
+            (Some(a), None) => format!("kept the audio ({}), but the image failed", a.display()),
+            (None, Some(p)) => format!("wrote {}, but the audio failed{why}", p.display()),
+            (None, None) => format!("export failed{why} — see the log"),
+        });
     }
 
     fn detectors(&mut self, ui: &mut egui::Ui) {
@@ -1230,10 +1267,10 @@ mod tests {
 
         let shared = Arc::new(Mutex::new(overlay::OverlayState::default()));
         let reader = Arc::clone(&shared);
-        shared.lock().unwrap().landscape = true;
+        shared.lock().unwrap().rung = Some(overlay::Rung::Signal);
         // A later write is visible to the holder of the clone — which is the
         // whole reason the callback reads through one.
-        assert!(reader.lock().unwrap().landscape);
+        assert_eq!(reader.lock().unwrap().rung, Some(overlay::Rung::Signal));
     }
 
     #[test]
