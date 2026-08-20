@@ -68,6 +68,17 @@ pub struct StructureScore {
     /// The measure that separates drawing from texture: ambience is fragments,
     /// a drawing is lines. See the module header.
     pub continuity: f32,
+    /// Coherent gain from integrating along drift lines, 0..1.
+    ///
+    /// Continuity can only follow ink bright enough to cross a threshold. This
+    /// sees lines that are not. See [`drift_search`].
+    pub drift: f32,
+    /// Direction of the strongest drift line, in degrees from horizontal.
+    ///
+    /// A measurement rather than a score: negative is a downward sweep, positive
+    /// upward, and the magnitude approaches 90 for a near-vertical stroke. Zero
+    /// when [`StructureScore::drift`] is zero.
+    pub drift_angle_deg: f32,
     /// Combined 0..1.
     pub score: f32,
     /// Pixels that carried enough gradient to be counted.
@@ -82,6 +93,8 @@ impl StructureScore {
             orientation_diversity: 0.0,
             diagonality: 0.0,
             continuity: 0.0,
+            drift: 0.0,
+            drift_angle_deg: 0.0,
             score: 0.0,
             edge_pixels: 0,
         }
@@ -344,6 +357,155 @@ fn continuity(image: &[u8], width: usize, height: usize, ink_threshold: u8) -> f
     }
 }
 
+/// Slopes tried per side, per axis. Total trials are four times this.
+///
+/// Resolution is set by the requirement that a line stay inside its own
+/// accumulator row: over a 64-pixel tile, adjacent slopes must differ by less
+/// than `2/64`, so a range of one covers in about 32 steps.
+const SLOPE_STEPS: usize = 32;
+
+/// Shallowest slope worth integrating, in rows per column.
+///
+/// Below this a "line" is a sustained tone, which is what the suppression pass
+/// upstream is already removing; integrating along it would only recover what
+/// was deliberately discarded. The transposed pass applies the same floor, which
+/// is what excludes broadband transients.
+const MIN_SLOPE: f32 = 0.08;
+
+/// A line must cross at least this fraction of the tile to be counted, so the
+/// peak cannot be a corner clipped by two or three pixels.
+const MIN_COVERAGE: f32 = 0.6;
+
+/// Excess sigma at which drift is called certain.
+const DRIFT_FULL_SIGMA: f32 = 4.0;
+
+/// Coherent integration along candidate drift lines — a Radon transform.
+///
+/// [`continuity`] can only follow ink that crosses a brightness threshold. A
+/// stroke fainter than that never becomes ink at all, so a quietly drawn picture
+/// scores zero however long and clean its lines are. Integrating *along* a
+/// candidate line instead sums the stroke coherently while noise adds in
+/// quadrature: a line `n` pixels long stands `sqrt(n)` further out of the noise
+/// than any single pixel of it does. Over a 64-pixel tile that is a factor of
+/// eight, which is the entire point — it reaches strokes local statistics cannot
+/// see.
+///
+/// This is how SETI finds drifting carriers and how radar finds tracks.
+///
+/// The subtlety is that the peak is a **maximum over many trials**, and the
+/// maximum of `n` noise samples grows like `sqrt(2 ln n)` whether or not
+/// anything is there. Reporting raw sigma would therefore manufacture a
+/// detection out of an empty tile. What is returned is the excess over that
+/// expectation, so noise sits at zero by construction.
+///
+/// Returns the excess mapped to 0..1 and the angle that produced it.
+fn drift_search(image: &[u8], width: usize, height: usize) -> (f32, f32) {
+    if width < 8 || height < 8 {
+        return (0.0, 0.0);
+    }
+
+    // Mean-subtracted once, and shared by every slope: the accumulator sums must
+    // be centred on zero or a bright tile would outrank a drawn one.
+    let mean = image[..width * height].iter().map(|v| *v as f32).sum::<f32>()
+        / (width * height) as f32;
+    let centred: Vec<f32> = image[..width * height]
+        .iter()
+        .map(|v| *v as f32 - mean)
+        .collect();
+    let transposed: Vec<f32> = (0..width * height)
+        .map(|i| centred[(i % height) * width + i / height])
+        .collect();
+
+    let mut best = (0.0f32, 0.0f32);
+    for (data, w, h, steep) in [
+        (&centred, width, height, false),
+        (&transposed, height, width, true),
+    ] {
+        let (sigma, slope, trials) = sweep(data, w, h);
+        if trials < 2 {
+            continue;
+        }
+        // Gumbel: the largest of `trials` standard normals lands here on average.
+        let expected_max = (2.0 * (trials as f32).ln()).sqrt();
+        let drift = ((sigma - expected_max) / DRIFT_FULL_SIGMA).clamp(0.0, 1.0);
+        if drift > best.0 {
+            // In the transposed pass a slope of `s` rows per column describes a
+            // line that is `1/s` in the original, hence the complement.
+            let angle = if steep {
+                slope.signum() * (90.0 - slope.abs().atan().to_degrees())
+            } else {
+                slope.atan().to_degrees()
+            };
+            best = (drift, angle);
+        }
+    }
+    best
+}
+
+/// One orientation of [`drift_search`]: the peak in sigma, its slope, and how
+/// many independent trials produced it.
+fn sweep(data: &[f32], width: usize, height: usize) -> (f32, f32, usize) {
+    let centre = width as f32 / 2.0;
+    let min_cover = (MIN_COVERAGE * width as f32) as usize;
+    let mut acc = vec![0.0f32; height];
+    let mut count = vec![0u32; height];
+    // Every normalized sum, pooled across slopes: they share a noise scale, so
+    // the distribution of the lot is the yardstick the peak is measured against.
+    let mut pooled: Vec<f32> = Vec::with_capacity(height * SLOPE_STEPS * 2);
+    let mut peak = (f32::NEG_INFINITY, 0.0f32);
+
+    for step in 0..SLOPE_STEPS * 2 {
+        // Slopes from -1 to 1, skipping the shallow band around zero.
+        let t = step as f32 / (SLOPE_STEPS * 2 - 1) as f32;
+        let slope = -1.0 + 2.0 * t;
+        if slope.abs() < MIN_SLOPE {
+            continue;
+        }
+
+        acc.fill(0.0);
+        count.fill(0);
+        for x in 0..width {
+            let shift = ((x as f32 - centre) * slope).round() as isize;
+            let lo = shift.max(0) as usize;
+            let hi = (height as isize + shift).clamp(0, height as isize) as usize;
+            for (offset, slot) in acc.iter_mut().enumerate().take(hi).skip(lo) {
+                *slot += data[(offset as isize - shift) as usize * width + x];
+                count[offset] += 1;
+            }
+        }
+
+        for (offset, slot) in acc.iter().enumerate() {
+            if (count[offset] as usize) < min_cover {
+                continue;
+            }
+            // Dividing by sqrt(n) rather than n keeps the noise scale constant
+            // across offsets that saw different numbers of pixels, so short and
+            // long lines are directly comparable.
+            let z = slot / (count[offset] as f32).sqrt();
+            pooled.push(z);
+            if z > peak.0 {
+                peak = (z, slope);
+            }
+        }
+    }
+
+    if pooled.len() < 8 {
+        return (0.0, 0.0, 0);
+    }
+    pooled.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = pooled[pooled.len() / 2];
+    // IQR rather than a standard deviation: the peak we are about to measure is
+    // itself in this sample, and a handful of real strokes must not be allowed
+    // to inflate the ruler they are measured with.
+    let q1 = pooled[pooled.len() / 4];
+    let q3 = pooled[3 * pooled.len() / 4];
+    let spread = (q3 - q1) / 1.349;
+    if !(spread > 0.0) {
+        return (0.0, 0.0, 0);
+    }
+    ((peak.0 - median) / spread, peak.1, pooled.len())
+}
+
 pub fn analyze(image: &[u8], width: usize, height: usize) -> StructureScore {
     if width < 3 || height < 3 || image.len() < width * height {
         return StructureScore::empty();
@@ -495,12 +657,16 @@ pub fn analyze(image: &[u8], width: usize, height: usize) -> StructureScore {
     let score =
         (continuity.clamp(0.0, 1.0) * (0.5 + 0.5 * coherence.clamp(0.0, 1.0))).clamp(0.0, 1.0);
 
+    let (drift, drift_angle_deg) = drift_search(image, width, height);
+
     StructureScore {
         coherence: coherence.clamp(0.0, 1.0),
         sparsity: sparsity.clamp(0.0, 1.0),
         orientation_diversity,
         diagonality,
         continuity,
+        drift,
+        drift_angle_deg,
         score,
         edge_pixels,
     }
@@ -878,6 +1044,78 @@ mod tests {
         let s = analyze(&img, W, H);
         assert!(s.diagonality < 0.35, "a click is vertical: {s:?}");
         assert!(!s.is_present(0.35), "{s:?}");
+    }
+
+    /// A noisy ground for the drift tests: a stroke drawn on a blank field is
+    /// not a test of anything, since the whole point is recovering a line that
+    /// noise is hiding.
+    fn noisy_ground(level: u8, spread: u8, seed: u32) -> Vec<u8> {
+        let mut img = vec![0u8; W * H];
+        let mut state = seed;
+        for p in img.iter_mut() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let n = ((state >> 24) as i32 - 128) * spread as i32 / 128;
+            *p = (level as i32 + n).clamp(0, 255) as u8;
+        }
+        img
+    }
+
+    #[test]
+    fn drift_calibration() {
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("noise only", noisy_ground(90, 60, 0x1234_5678)),
+            ("noise only (2)", noisy_ground(90, 60, 0xDEAD_BEEF)),
+            ("faint diagonal", {
+                let mut i = noisy_ground(90, 60, 0x1234_5678);
+                line(&mut i, 0, 10, 95, 80, 150);
+                i
+            }),
+            ("very faint diagonal", {
+                let mut i = noisy_ground(90, 60, 0x1234_5678);
+                line(&mut i, 0, 10, 95, 80, 115);
+                i
+            }),
+            ("bright diagonal", {
+                let mut i = noisy_ground(90, 60, 0x1234_5678);
+                line(&mut i, 0, 10, 95, 80, 255);
+                i
+            }),
+            ("steep diagonal", {
+                let mut i = noisy_ground(90, 60, 0x1234_5678);
+                line(&mut i, 10, 0, 80, 95, 150);
+                i
+            }),
+            ("horizontal tones", {
+                let mut i = noisy_ground(90, 60, 0x1234_5678);
+                for y in [20usize, 40, 60] {
+                    hline(&mut i, y, 200);
+                }
+                i
+            }),
+            ("vertical clicks", {
+                let mut i = noisy_ground(90, 60, 0x1234_5678);
+                for x in [20isize, 40, 60] {
+                    line(&mut i, x, 0, x, 95, 200);
+                }
+                i
+            }),
+            ("line art", {
+                let mut i = blank();
+                circle(&mut i, 48, 48, 30, 240);
+                line(&mut i, 10, 10, 85, 85, 240);
+                line(&mut i, 85, 10, 10, 85, 240);
+                i
+            }),
+        ];
+        println!("\n{:<22} {:>7} {:>9} {:>7}", "case", "drift", "angle", "cont");
+        for (name, img) in &cases {
+            let s = analyze(img, W, H);
+            println!(
+                "{name:<22} {:>7.3} {:>8.1}° {:>7.3}",
+                s.drift, s.drift_angle_deg, s.continuity
+            );
+        }
+        println!();
     }
 
     #[test]

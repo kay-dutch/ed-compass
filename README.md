@@ -2,16 +2,15 @@
 
 ![Status](https://img.shields.io/badge/STATUS-PRE--RELEASE%20WORK%20IN%20PROGRESS-critical?style=for-the-badge)
 
-> [!CAUTION]
+> [!IMPORTANT]
 > ## ⚠️ PRE-RELEASE — WORK IN PROGRESS
 >
-> **THIS IS NOT READY FOR PUBLIC DISTRIBUTION. PLEASE DO NOT SHARE OR
-> REDISTRIBUTE IT YET.**
+> Detector thresholds, file formats and the interface are all still changing, so
+> anything ED Compass reports should be treated as provisional rather than
+> dependable. Releases are published as pre-releases for the same reason.
 >
-> This repository is published for development and testing only. Detector
-> thresholds, file formats and the interface are all still changing, results are
-> not yet dependable, and there are no published releases to install. Anything it
-> reports should be treated as provisional.
+> Try it, and please do report what you find — but don't build a discovery claim
+> on it yet.
 
 **Elite Dangerous hides signals in its audio. This listens for them while you fly.**
 
