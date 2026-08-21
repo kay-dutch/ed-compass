@@ -4,6 +4,7 @@
 //! confirm the capture is healthy, not to find signals.
 
 pub mod direction;
+pub mod fold;
 pub mod keying;
 pub mod kurtosis;
 pub mod morse;

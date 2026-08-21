@@ -389,6 +389,17 @@ impl AnalysisEngine {
     }
 
     /// The background-subtracted spectrogram: only what changed.
+    /// The long-term tier: one hour at `longterm_fps`, which is what epoch
+    /// folding needs. The waterfall tier is far too short — it holds barely more
+    /// than one Landscape cycle.
+    pub fn longterm(&self) -> &SpectrogramHistory {
+        &self.longterm
+    }
+
+    pub fn longterm_fps(&self) -> f32 {
+        self.longterm_fps
+    }
+
     pub fn excess_waterfall(&self) -> &SpectrogramHistory {
         &self.excess_waterfall
     }

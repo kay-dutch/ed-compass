@@ -137,6 +137,11 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     export_png: Option<PathBuf>,
 
+    /// Fold the long-term tier at its best period and write the result to this
+    /// PNG — one averaged cycle. Headless only.
+    #[arg(long, value_name = "PATH")]
+    export_fold: Option<PathBuf>,
+
     /// Write what the *structure detector* sees — the scan image after tones and
     /// transients are removed — to this PNG. Headless only.
     #[arg(long, value_name = "PATH")]
@@ -330,6 +335,7 @@ fn run_headless(
     duration: Option<f32>,
     export_png: Option<PathBuf>,
     export_scan: Option<PathBuf>,
+    export_fold: Option<PathBuf>,
 ) -> Result<()> {
     // Read the configured thresholds rather than repeating literals here, or the
     // console disagrees with the UI about what counts as a detection.
@@ -470,6 +476,45 @@ fn run_headless(
         ) {
             Ok(()) => println!("Exported {}", path.display()),
             Err(e) => eprintln!("could not export: {e}"),
+        }
+    }
+
+    if let Some(path) = export_fold
+        && let Some(engine) = app.engine()
+    {
+        let history = engine.longterm();
+        let fps = engine.longterm_fps();
+        match ed_compass::analysis::fold::search(history, fps, 30.0, 600.0, 256) {
+            Some(folded) => {
+                println!(
+                    "Folded {:.1} cycles at {:.2} s (sharpness {:.2}) — {} bands x {} phases",
+                    folded.cycles,
+                    folded.period_seconds,
+                    folded.sharpness(),
+                    folded.bands,
+                    folded.phases
+                );
+                let image = folded.to_image();
+                // The question folding exists to answer: does the *averaged*
+                // cycle look drawn, when the raw recording did not?
+                let scored = ed_compass::analysis::structure::analyze(
+                    &image,
+                    folded.phases,
+                    folded.bands,
+                );
+                println!(
+                    "  folded structure {:.3} (continuity {:.2}, coherence {:.2}, diversity {:.2})",
+                    scored.score,
+                    scored.continuity,
+                    scored.coherence,
+                    scored.orientation_diversity
+                );
+                match write_gray_png(&path, &image, folded.phases, folded.bands) {
+                    Ok(()) => println!("Exported the fold: {}", path.display()),
+                    Err(e) => eprintln!("could not export the fold: {e}"),
+                }
+            }
+            None => eprintln!("not enough history to fold — need at least two cycles"),
         }
     }
 
@@ -743,6 +788,7 @@ fn main() -> Result<()> {
             cli.duration,
             cli.export_png.clone(),
             cli.export_scan.clone(),
+            cli.export_fold.clone(),
         )
     } else {
         let backend = cli

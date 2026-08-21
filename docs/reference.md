@@ -79,7 +79,13 @@ one-shot signal such as a Thargoid probe, which transmits once and never repeats
 
 **`structure`** — drawn structure in the spectrogram. It looks for ink that forms
 long, thin, connected strokes that *turn*, and separately for faint lines
-recovered by integrating along them. Ambience is fragments; a drawing is lines.
+recovered by integrating along them.
+
+> **Unproven, and currently unreliable.** Measured against a real in-game capture
+> of the Landscape Signal — as opposed to a synthetic one — this does not
+> separate the signal from ordinary ship ambience, which scores as highly or
+> higher. Do not act on this lamp. The period reading under SIGNAL is the
+> trustworthy indicator.
 
 The period remains the most trustworthy discriminator of the three. Ship ambience
 readily produces keying scores and periods scattered across a wide range, while
