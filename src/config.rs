@@ -159,10 +159,18 @@ pub struct Config {
     pub keying_min_hz: f32,
     /// Structure score at or above which a drawing is reported present.
     ///
-    /// Treat this as advisory. Measured, the structure score does not separate
-    /// the Landscape Signal (0.554) from ordinary ship ambience (0.39–0.65) —
-    /// any threshold that silences one silences the other. The period is what
-    /// identifies the signal; see `matches_landscape`.
+    /// Score at which the structure lamp starts to light.
+    ///
+    /// Set for "worth a glance", not for "certain". This tool exists to help
+    /// find signals nobody has catalogued, and for that job the expensive
+    /// mistake is silence on something real — a commander who looks at a dim
+    /// lamp and finds nothing has lost two seconds, while one flown past an
+    /// undiscovered signal has lost it entirely. The pilot is the classifier;
+    /// this only decides where to look.
+    ///
+    /// Raise it if the panel is distracting you. It was 0.85 — a
+    /// confident-claim threshold — which meant a reading of 0.84 looked exactly
+    /// like silence.
     pub structure_threshold: f32,
     /// How much audio to keep when a primary detector fires. Long enough to
     /// hold more than one Landscape cycle.
@@ -368,13 +376,13 @@ impl Default for Config {
             // wide gap matters because a Thargoid probe transmits **once** — it
             // is not periodic, so keying is the only detector that can catch it
             // and it needs headroom.
-            keying_threshold: 0.75,
+            keying_threshold: 0.55,
             keying_min_hz: 400.0,
             // Raised from 0.35 with the continuity metric. Measured: synthetic
             // line art scores 0.977 and synthetic mountains 0.998, while the
             // worst real recording reaches 0.699. The old score could not be
             // thresholded at all — it ranked noise above line art.
-            structure_threshold: 0.85,
+            structure_threshold: 0.30,
             detector_capture_seconds: 130.0,
 
             overlay_enabled: true,
@@ -386,7 +394,7 @@ impl Default for Config {
             detect_morse: true,
             morse_min_hz: 60.0,
             morse_max_hz: 200.0,
-            morse_threshold: 0.75,
+            morse_threshold: 0.60,
             renderer: "glow".into(),
             overlay_fit_between_plotters: true,
             overlay_x_offset_px: 220.0,

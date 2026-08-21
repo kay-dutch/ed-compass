@@ -315,7 +315,15 @@ fn build_app(cli: &Cli, cfg: Config, capture_dir: PathBuf) -> Result<App> {
     let devices = device::enumerate().context("enumerating audio endpoints")?;
     let requested = cli.device.clone().unwrap_or_else(|| cfg.device.clone());
     let selected: AudioDevice = device::select(&devices, &requested).cloned().context(
-        "no audio endpoint available — pass --test-landscape or --input to run without one",
+        "no audio output endpoint is available, so there is nothing to listen to.\n\
+         \n\
+         ED Compass captures what your speakers or headphones are playing. With no\n\
+         output device present — headphones unplugged, or none configured — there is\n\
+         no game audio to hear. It will not fall back to a microphone: that would\n\
+         record the room rather than the game.\n\
+         \n\
+         Plug in or enable an output device and start it again, or run without one\n\
+         using --test-landscape or --input FILE.",
     )?;
     log::info!("using {}", selected.display_name());
 
@@ -482,7 +490,9 @@ fn run_headless(
     if let Some(path) = export_fold
         && let Some(engine) = app.engine()
     {
-        let history = engine.longterm();
+        // The excess tier, not the level tier: folding raw level across a jump
+        // averages two different environments together.
+        let history = engine.longterm_excess();
         let fps = engine.longterm_fps();
         match ed_compass::analysis::fold::search(history, fps, 30.0, 600.0, 256) {
             Some(folded) => {
@@ -497,17 +507,11 @@ fn run_headless(
                 let image = folded.to_image();
                 // The question folding exists to answer: does the *averaged*
                 // cycle look drawn, when the raw recording did not?
-                let scored = ed_compass::analysis::structure::analyze(
-                    &image,
-                    folded.phases,
-                    folded.bands,
-                );
+                let scored =
+                    ed_compass::analysis::structure::analyze(&image, folded.phases, folded.bands);
                 println!(
                     "  folded structure {:.3} (continuity {:.2}, coherence {:.2}, diversity {:.2})",
-                    scored.score,
-                    scored.continuity,
-                    scored.coherence,
-                    scored.orientation_diversity
+                    scored.score, scored.continuity, scored.coherence, scored.orientation_diversity
                 );
                 match write_gray_png(&path, &image, folded.phases, folded.bands) {
                     Ok(()) => println!("Exported the fold: {}", path.display()),

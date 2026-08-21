@@ -52,18 +52,36 @@ impl AudioDevice {
 
 /// Pick the device matching `id`, falling back to the default render endpoint
 /// (i.e. system audio) when `id` is empty or no longer present.
+/// Choose an endpoint to listen to. **Loopback only.**
+///
+/// There is deliberately no fallback to "whatever device exists". This tool
+/// listens to what the game plays, which is a render endpoint opened in
+/// loopback; a microphone is never a correct answer to that question. The
+/// fallback used to be `devices.first()`, and on a machine whose headphones had
+/// been unplugged that resolved to a microphone — so the tool opened it, wrote
+/// it to disk as captures, and recorded the room instead of the game. Returning
+/// `None` and doing nothing is the only acceptable behaviour when there is
+/// nothing to listen to.
 pub fn select<'a>(devices: &'a [AudioDevice], id: &str) -> Option<&'a AudioDevice> {
     if !id.is_empty() {
-        if let Some(d) = devices.iter().find(|d| d.id == id) {
-            return Some(d);
+        match devices.iter().find(|d| d.id == id) {
+            // An explicitly configured device still has to be one we can
+            // legitimately listen to.
+            Some(d) if d.kind.is_loopback() => return Some(d),
+            Some(d) => log::warn!(
+                "configured device {} is a {} endpoint, not an output; ignoring it",
+                d.display_name(),
+                d.kind.label()
+            ),
+            None => log::warn!(
+                "configured device {id} is not present; falling back to the default output"
+            ),
         }
-        log::warn!("configured device {id} is not present; falling back to the default output");
     }
     devices
         .iter()
         .find(|d| d.kind.is_loopback() && d.is_default)
         .or_else(|| devices.iter().find(|d| d.kind.is_loopback()))
-        .or_else(|| devices.first())
 }
 
 #[cfg(windows)]
@@ -259,10 +277,16 @@ mod tests {
     }
 
     #[test]
-    fn a_configured_id_is_honoured() {
+    fn a_configured_id_is_honoured_if_it_is_an_output() {
         let d = devices();
         assert_eq!(select(&d, "hdmi").unwrap().id, "hdmi");
-        assert_eq!(select(&d, "mic").unwrap().id, "mic");
+        // A microphone named explicitly is still refused, and the default output
+        // is used instead. Configuring one is far more likely to be a mistake
+        // than a decision, and the cost of being wrong is recording the room.
+        assert!(
+            select(&d, "mic").is_some_and(|s| s.kind.is_loopback()),
+            "a configured capture endpoint must not be selected"
+        );
     }
 
     #[test]
@@ -289,14 +313,30 @@ mod tests {
         assert!(select(&[], "anything").is_none());
     }
 
+    /// The behaviour that replaced `capture_only_machines_still_select_something`.
+    ///
+    /// That test asserted we would fall back to any endpoint at all, and it was
+    /// wrong in a way that only showed up in the field: with the headphones
+    /// unplugged there was no output endpoint, the fallback resolved to a
+    /// microphone, and the tool opened it and began writing the room to disk as
+    /// signal captures. There is no acceptable fallback here — with nothing to
+    /// listen to, the answer is to listen to nothing.
     #[test]
-    fn capture_only_machines_still_select_something() {
+    fn a_machine_with_no_output_endpoint_selects_nothing() {
         let only_capture = vec![AudioDevice {
             id: "mic".into(),
             name: "Microphone".into(),
             kind: DeviceKind::Capture,
             is_default: true,
         }];
-        assert_eq!(select(&only_capture, "").unwrap().id, "mic");
+        assert!(
+            select(&only_capture, "").is_none(),
+            "a microphone is never a substitute for the game's output"
+        );
+        assert!(
+            select(&only_capture, "mic").is_none(),
+            "not even when it is named explicitly"
+        );
+        assert!(select(&[], "").is_none(), "and no devices means no device");
     }
 }

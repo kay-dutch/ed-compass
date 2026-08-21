@@ -60,7 +60,12 @@ impl Folded {
     /// normalisation whose absence made the structure detector unable to score a
     /// real recording at all.
     pub fn to_image(&self) -> Vec<u8> {
-        let finite: Vec<f32> = self.mean_db.iter().copied().filter(|v| v.is_finite()).collect();
+        let finite: Vec<f32> = self
+            .mean_db
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
         if finite.is_empty() {
             return vec![0; self.bands * self.phases];
         }
@@ -101,8 +106,8 @@ impl Folded {
                 continue;
             }
             let mean = finite.iter().sum::<f32>() / finite.len() as f32;
-            let variance = finite.iter().map(|v| (v - mean).powi(2)).sum::<f32>()
-                / finite.len() as f32;
+            let variance =
+                finite.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / finite.len() as f32;
             // Neighbour differences estimate the noise left after folding; the
             // full variance includes any real structure along phase.
             let mut diffs = 0.0f32;

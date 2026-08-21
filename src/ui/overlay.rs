@@ -291,6 +291,13 @@ impl Rung {
 pub struct OverlayState {
     /// Highest rung the evidence reaches. `None` means nothing found.
     pub rung: Option<Rung>,
+    /// How strong the evidence is at each rung, 0..1, weakest rung first:
+    /// anomaly, cypher, signal.
+    ///
+    /// Kept alongside `rung` rather than replacing it because the two answer
+    /// different questions — *how far* the evidence goes, and *how good* it is —
+    /// and the panel shows both: position on the ladder, and brightness.
+    pub strength: [f32; 3],
     /// Keying is firing while music plays, so the reading is suspect. Colours
     /// the CYPHER rung amber rather than clearing it — "this looks like music"
     /// is worth more than "something is encoded".
@@ -334,8 +341,47 @@ impl OverlayState {
         } else {
             structure_detail
         };
+
+        // Evidence behind each rung, taken from the detectors' own numbers
+        // rather than from whether they cleared a threshold. This is what lets a
+        // faint reading show as a faint lamp instead of as silence.
+        let keying_confidence = app
+            .engine()
+            .and_then(|e| e.keying())
+            .map(|k| k.confidence)
+            .unwrap_or(0.0);
+        let structure_score = app.engine().map(|e| e.structure().score).unwrap_or(0.0);
+        let morse_confidence = app.morse().map(|m| m.confidence).unwrap_or(0.0);
+        let period_confidence = app
+            .periodicity()
+            .filter(|_| app.landscape_present())
+            .map(|p| p.confidence)
+            .unwrap_or(0.0);
+
+        let signal_strength = morse_confidence.max(period_confidence);
+        let cypher_strength = keying_confidence.max(structure_score);
+        // The quiet rung. Deliberately not proportional to anything: it is lit
+        // much of the time, and its job is to say "something changed here", not
+        // to compete for attention with the rungs above it.
+        let anomaly_strength: f32 = if anomaly { 0.4 } else { 0.0 };
+
+        // Cumulative, like the lamps: a rung is never dimmer than the one above
+        // it, or the ladder would read as broken when the top is the brightest.
+        let signal_strength = if signal {
+            signal_strength.max(0.5)
+        } else {
+            0.0
+        };
+        let cypher_strength = if cypher {
+            cypher_strength.max(0.4).max(signal_strength)
+        } else {
+            signal_strength
+        };
+        let anomaly_strength = anomaly_strength.max(cypher_strength);
+
         Self {
             rung: Rung::of(anomaly, cypher, signal),
+            strength: [anomaly_strength, cypher_strength, signal_strength],
             keying_suspect: app.keying_suspect(),
             anomaly_detail: anomaly_detail(app),
             cypher_detail,
@@ -432,13 +478,22 @@ pub fn overlay(ui: &mut egui::Ui, state: &OverlayState, spectrogram: Option<&egu
     // identify. The detail line names the match when there is one.
     let reached = state.rung;
     let lit = |r: Rung| reached.is_some_and(|got| got >= r);
+    // A rung that the ladder has reached is lit at its own strength; one it has
+    // not is dark regardless.
+    let level = |r: Rung, slot: usize| {
+        if lit(r) {
+            state.strength[slot].max(0.05)
+        } else {
+            0.0
+        }
+    };
 
     hud_lamp(
         &painter,
         row(0.0),
         "SIGNAL",
         &state.signal_detail,
-        lit(Rung::Signal),
+        level(Rung::Signal, 2),
         hud::GREEN,
     );
     // Amber overrides for a suspect detection: "this looks like music" is worth
@@ -453,7 +508,7 @@ pub fn overlay(ui: &mut egui::Ui, state: &OverlayState, spectrogram: Option<&egu
         row(1.0),
         "CYPHER",
         &state.cypher_detail,
-        lit(Rung::Cypher),
+        level(Rung::Cypher, 1),
         cypher_colour,
     );
     // The bottom rung is deliberately the quietest colour on the panel. It is
@@ -465,29 +520,54 @@ pub fn overlay(ui: &mut egui::Ui, state: &OverlayState, spectrogram: Option<&egu
         row(2.0),
         "ANOMALY",
         &state.anomaly_detail,
-        lit(Rung::Anomaly),
+        level(Rung::Anomaly, 0),
         hud::AMBER,
     );
 }
 
 /// One indicator row: dot, name, and its supporting number underneath.
+/// One indicator row, lit in proportion to the evidence behind it.
+///
+/// `strength` is 0..1, and it is not a threshold. This tool exists to find
+/// signals nobody has catalogued, which means the expensive mistake is staying
+/// dark on something real — a commander who glances at a dim lamp and finds
+/// nothing has lost two seconds, while one flown past an undiscovered signal has
+/// lost it for good. A binary lamp throws away everything the detectors know
+/// short of certainty: a score of 0.84 against a threshold of 0.85 used to look
+/// exactly like silence.
+///
+/// So the pilot is the classifier and this is an attention director. Brightness
+/// carries the confidence, the number underneath carries the detail, and the
+/// decision stays with the person who can look at the waterfall and judge.
 fn hud_lamp(
     painter: &egui::Painter,
     row: egui::Rect,
     label: &str,
     detail: &str,
-    lit: bool,
+    strength: f32,
     lit_colour: egui::Color32,
 ) {
-    let colour = if lit { lit_colour } else { hud::IDLE };
+    let strength = strength.clamp(0.0, 1.0);
+    // Below this there is genuinely nothing to say, and a lamp that never rests
+    // is a lamp nobody reads.
+    let lit = strength >= 0.05;
+    // Never fully dim while lit: the faintest evidence still has to be visible
+    // against the cockpit behind it.
+    let intensity = 0.35 + 0.65 * strength;
+    let colour = if lit {
+        lit_colour.gamma_multiply(intensity)
+    } else {
+        hud::IDLE
+    };
     let centre = egui::pos2(row.left() + 7.0, row.center().y);
     painter.circle_filled(centre, 3.5, colour);
     if lit {
         // A soft ring, so a lit lamp registers in peripheral vision while you
-        // are flying rather than needing to be looked at.
+        // are flying rather than needing to be looked at. It grows with the
+        // evidence, which is what makes strength readable at a glance.
         painter.circle_stroke(
             centre,
-            6.5,
+            5.0 + 2.5 * strength,
             egui::Stroke::new(1.0, colour.gamma_multiply(0.5)),
         );
     }
@@ -498,7 +578,11 @@ fn hud_lamp(
         egui::Align2::LEFT_BOTTOM,
         label,
         egui::FontId::monospace(11.0),
-        if lit { lit_colour } else { hud::AMBER },
+        if lit {
+            lit_colour.gamma_multiply(intensity)
+        } else {
+            hud::AMBER
+        },
     );
     if !detail.is_empty() {
         painter.text(

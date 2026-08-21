@@ -311,7 +311,28 @@ mod imp {
             }
 
             let mut got_audio = false;
+            // Bounded, so a misbehaving endpoint cannot hold this thread inside
+            // the drain loop indefinitely.
+            //
+            // The exit condition is the endpoint reporting no more packets, and
+            // that trusts the endpoint to eventually say so. A virtual or
+            // half-removed device that keeps claiming data is available spins
+            // here at full speed with the outer wait never reached — one core
+            // pinned, in a thread running at audio priority, which is enough to
+            // make a whole machine feel locked up. Shared-mode packets are ~10 ms,
+            // so this ceiling is around two seconds of audio in one pass: far
+            // more than a healthy device ever queues, far less than forever.
+            const MAX_PACKETS_PER_WAKE: usize = 200;
+            let mut drained = 0usize;
             loop {
+                if drained >= MAX_PACKETS_PER_WAKE {
+                    log::warn!(
+                        "endpoint queued more than {MAX_PACKETS_PER_WAKE} packets in one wake; \
+                         yielding to avoid spinning"
+                    );
+                    break;
+                }
+                drained += 1;
                 let available = unsafe { stream.capture.GetNextPacketSize() }
                     .context("querying the next packet size")?;
                 if available == 0 {

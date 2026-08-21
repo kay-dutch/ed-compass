@@ -149,6 +149,21 @@ pub struct AnalysisEngine {
     excess_waterfall: SpectrogramHistory,
     longterm: SpectrogramHistory,
     summarizer: LongTermSummarizer,
+    /// The long-term tier again, but built from **excess** rather than level.
+    ///
+    /// This is the tier epoch folding uses, and the distinction is what makes
+    /// folding survive a moving observer. Elite is an exploration game: the ship
+    /// carries the microphone from system to system, and the ambience changes
+    /// under it. Folding raw level across a jump averages two different
+    /// environments into mush. The background model already tracks the current
+    /// environment on a 60-second median, so the excess is what is left once
+    /// *this* place has been subtracted — and a signal audible galaxy-wide keeps
+    /// contributing to it across the whole trip while local ambience does not.
+    ///
+    /// Under a megabyte for an hour, which at the Landscape Signal's cycle is 33
+    /// repetitions.
+    longterm_excess: SpectrogramHistory,
+    excess_summarizer: LongTermSummarizer,
     /// Rolling health statistics, accumulated as audio arrives rather than by
     /// rescanning the ring.
     health: HealthWindow,
@@ -280,7 +295,22 @@ impl AnalysisEngine {
                 longterm_frames,
                 DbRange::default(),
             ),
+            longterm_excess: SpectrogramHistory::new(
+                cfg.longterm_bands,
+                longterm_frames,
+                DbRange {
+                    min: -30.0,
+                    max: 60.0,
+                },
+            ),
             summarizer: LongTermSummarizer::new(
+                cfg.longterm_bands,
+                bins,
+                format.sample_rate,
+                20.0,
+                frames_per_summary,
+            ),
+            excess_summarizer: LongTermSummarizer::new(
                 cfg.longterm_bands,
                 bins,
                 format.sample_rate,
@@ -396,6 +426,13 @@ impl AnalysisEngine {
         &self.longterm
     }
 
+    /// The long-term tier built from excess rather than level — the one epoch
+    /// folding uses, because it is normalised against wherever the ship
+    /// currently is.
+    pub fn longterm_excess(&self) -> &SpectrogramHistory {
+        &self.longterm_excess
+    }
+
     pub fn longterm_fps(&self) -> f32 {
         self.longterm_fps
     }
@@ -509,6 +546,7 @@ impl AnalysisEngine {
         }
         self.detector.reset_events();
         self.summarizer.reset();
+        self.excess_summarizer.reset();
         if let Some(k) = self.keying.as_mut() {
             // Symbol timing across a gap would be fiction.
             k.reset();
@@ -587,6 +625,9 @@ impl AnalysisEngine {
             self.update_primary_detectors();
             if let Some(summary) = self.summarizer.push(&self.mono_db) {
                 self.longterm.push_db(&summary);
+            }
+            if let Some(summary) = self.excess_summarizer.push(self.detector.excess_db()) {
+                self.longterm_excess.push_db(&summary);
             }
             if self.direction_finding {
                 self.accumulate_direction();
