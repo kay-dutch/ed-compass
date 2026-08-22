@@ -54,6 +54,13 @@ Two settings in Elite are worth changing:
 > drifting notes a real signal looks like. Turning it off is the single biggest
 > thing you can do for detection quality. Ship and effects audio can stay on.
 
+It hears your whole sound output, not just the game — so anything else playing
+lands in the recording alongside the signal. Worth silencing before a serious
+listen: **Discord or any voice chat**, **music players and Spotify**, **video in
+a browser tab**, and **Windows notification sounds**. A voice on Discord looks
+much like a transmission to a detector, and a paused video that resumes itself
+will sit in the middle of your capture.
+
 ## What you'll see
 
 Three indicators, in the order you should trust them:
