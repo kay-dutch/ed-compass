@@ -445,7 +445,7 @@ impl Default for Config {
             // wide gap matters because a Thargoid probe transmits **once** — it
             // is not periodic, so keying is the only detector that can catch it
             // and it needs headroom.
-            keying_threshold: 0.55,
+            keying_threshold: 0.75,
             keying_min_hz: 400.0,
             // Raised from 0.35 with the continuity metric. Measured: synthetic
             // line art scores 0.977 and synthetic mountains 0.998, while the

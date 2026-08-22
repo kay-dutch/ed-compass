@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.3 — pre-release
+
+* Bugfix: **The overlay no longer disappears when you Alt-Tab away.** It 
+* Bugfix: SIGNAL and CYPHER no longer stay lit through ordinary flight.
+
 ## v0.4.2 — pre-release
 
 * SIGNAL stays lit while a detection is still on screen, so the lamp and the
@@ -25,16 +30,16 @@
   anything; on stereo it reports the same bearing whatever is playing.
 * The event list highlights the detection score rather than the bearing.
 * Turn the in-game music off — see the README for why.
-* Known limitation: **STRUCTURE is unproven.** It does not reliably tell the
-  Landscape Signal apart from ordinary ship noise. SIGNAL and the period reading
-  are the ones to trust.
+* Known limitation: **drawn-structure detection is unproven.** It does not
+  reliably tell the Landscape Signal apart from ordinary ship noise. The period
+  reading is the one to trust.
 * Various fixes.
 
 ## v0.3.0 — pre-release
 
 * Detects Thargoid Sensor Morse, and keyed transmissions generally, reported
   through the SIGNAL lamp.
-* STRUCTURE is much less prone to firing on ordinary ship noise.
+* Drawn-structure detection is much less prone to firing on ordinary ship noise.
 * Fixed a phantom symbol rate in the keying readout.
 
 ## v0.2.0 — pre-release

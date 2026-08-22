@@ -35,6 +35,12 @@ use crate::pipeline::{AnalysisEngine, AnalysisSnapshot, Detection};
 ///
 /// The tool measures the reference at 109.67 s, so a couple of seconds is
 /// generous without being loose.
+/// How recently something must have been detected for SIGNAL to be lit.
+///
+/// Long enough to catch your eye after it has passed, short enough that the lamp
+/// still describes the present.
+const SIGNAL_RECENCY_SECONDS: f64 = 15.0;
+
 const LANDSCAPE_TOLERANCE_SECONDS: f32 = 2.0;
 
 /// A detection as shown in the event list.
@@ -307,15 +313,16 @@ impl App {
     /// the detail line says which.
     /// Is SIGNAL lit?
     ///
-    /// Lit while the evidence is **still on screen**, which is the same rule the
-    /// timeline strip draws by — so the lamp and the strip cannot disagree about
-    /// whether there is something to look at.
+    /// Lit while something was detected **recently**, timed from when it
+    /// happened rather than from when the software noticed.
     ///
-    /// This replaced a fixed hold, and the hold was the wrong idea twice over. It
-    /// was an invented number, and it described *when the tool noticed* rather
-    /// than when anything happened, so the lamp and the strip told different
-    /// stories about the same detection. How long a signal stays visible is a
-    /// real quantity; fifteen seconds was not.
+    /// The window is short on purpose. Lighting the lamp for anything still on
+    /// screen sounds right and is not: detections are sparse but the display
+    /// holds two minutes, so at least one is nearly always present and the lamp
+    /// never goes out. Meanwhile the timeline strip showed the truth — a few
+    /// marks, correctly placed. The lamp answers "is something happening"; the
+    /// strip answers "when did things happen". Those are different windows, and
+    /// giving them the same one made the lamp useless.
     pub fn signal_present(&self) -> bool {
         if self.landscape_present
             || self
@@ -327,12 +334,11 @@ impl App {
         let Some(engine) = self.engine.as_ref() else {
             return false;
         };
-        let window = self.cfg.overlay_spectrogram_seconds.max(1.0) as f64;
         let now = engine.timeline_seconds();
         engine
             .traced_strokes()
             .iter()
-            .any(|s| now - s.end_seconds <= window)
+            .any(|s| now - s.end_seconds <= SIGNAL_RECENCY_SECONDS)
     }
 
     /// The current period estimate, for display.

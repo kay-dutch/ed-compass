@@ -141,12 +141,38 @@ fn run_with(slot: std::rc::Rc<std::cell::RefCell<Option<App>>>, backend: Backend
     );
     log::info!("opening the window with the {} renderer", backend.as_str());
 
+    /// Keep the event loop running whatever the window manager thinks.
+    ///
+    /// The overlay is a deferred viewport, and egui closes one as soon as a frame
+    /// goes by without it being shown. Ours is shown from the per-frame logic —
+    /// which eframe stops calling when the main window is occluded or minimized.
+    /// Alt-Tab away for long enough and the overlay is not merely hidden, it is
+    /// destroyed, and it does not come back until the program is restarted. That
+    /// happened in flight, while taking screenshots.
+    ///
+    /// A thread that asks for a repaint on a fixed cadence removes the dependency
+    /// entirely: frames keep happening whether or not anything is visible, so the
+    /// viewport is re-shown every time and cannot lapse. It costs one sleeping
+    /// thread.
+    fn start_repaint_heartbeat(ctx: egui::Context) {
+        std::thread::Builder::new()
+            .name("repaint-heartbeat".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_millis(33));
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawning the repaint heartbeat");
+    }
+
     let options = native_options(backend);
     eframe::run_native(
         "ED Compass",
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            start_repaint_heartbeat(cc.egui_ctx.clone());
             let app = slot
                 .borrow_mut()
                 .take()
@@ -273,6 +299,8 @@ struct CompassUi {
     last_waterfall: Instant,
     /// Size the waterfall image was last built at, so it is rebuilt on resize.
     waterfall_size: [usize; 2],
+    /// When the per-frame logic last ran. See the check at the top of `logic`.
+    last_logic: Instant,
     /// What the last Export did, and when, shown next to the button. A log line
     /// is no use to someone in a cockpit who needs to know the moment was saved.
     ///
@@ -322,6 +350,7 @@ impl CompassUi {
             waterfall_texture: None,
             last_waterfall: Instant::now() - Duration::from_secs(1),
             waterfall_size: [0, 0],
+            last_logic: Instant::now(),
             export_status: None,
         }
     }
@@ -1301,6 +1330,17 @@ impl eframe::App for CompassUi {
     /// exactly where draining capture belongs, so a minimized window does not
     /// stall the analysis.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // A gap here is the one thing that can destroy the overlay, so it is
+        // worth saying so out loud rather than discovering it in flight again.
+        let since = self.last_logic.elapsed();
+        if since >= Duration::from_millis(500) {
+            log::warn!(
+                "no frame for {:.1} s — the overlay viewport may have lapsed",
+                since.as_secs_f32()
+            );
+        }
+        self.last_logic = Instant::now();
+
         self.app.pump();
         if self.last_snapshot.elapsed() >= self.snapshot_interval {
             self.snapshot = self.app.snapshot();

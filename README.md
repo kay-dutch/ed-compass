@@ -63,13 +63,15 @@ will sit in the middle of your capture.
 
 ## What you'll see
 
-Three indicators, in the order you should trust them:
+Three lamps, reading upward as a ladder. Each rung is stronger evidence than the
+one below it, and they light together — so what matters is **how far up it
+goes**, not which one is lit.
 
 | | |
 |---|---|
-| **SIGNAL** | The strongest thing it has. Either a signal it can name — the Landscape Signal by its period, or a keyed transmission such as Thargoid Sensor Morse — or a stroke it has traced across the spectrogram. The line beneath says which. |
-| **TRANSMIT** | Something is keying tones on and off, the way a transmission does. |
-| **STRUCTURE** | Thin diagonal strokes in the spectrogram — something *drawn* rather than noise. Unproven: see the note below. |
+| **SIGNAL** | The strongest claim. Either something it can name — the Landscape Signal by its period, or a keyed transmission such as Thargoid Sensor Morse — or a stroke it has traced across the spectrogram. The line beneath says which. |
+| **CYPHER** | Something carries deliberate structure: tones keyed on and off, or a shape drawn into the spectrogram. |
+| **ANOMALY** | Something departed from the background. The quietest rung, and the most often lit — ordinary ship noise sets it off regularly, which is why it is coloured to be ignorable. |
 
 Beside them, a live spectrogram of what the game is playing, marked up as it
 goes:
@@ -84,10 +86,12 @@ goes:
 When something fires, the audio is saved automatically, tagged with the star
 system and coordinates you were at.
 
-**Two lamps are worth less than they look.** TRANSMIT also lights on ordinary
-ship ambience — it is a hint, not a verdict, and it lights blue to say so.
-STRUCTURE is not yet dependable at all: it cannot reliably tell a real signal
-apart from ship noise, so a dark STRUCTURE lamp means nothing either way.
+**ANOMALY on its own means very little.** Ordinary ship noise departs from the
+background constantly, which is why that rung is the quietest colour on the
+panel. It is worth glancing at when the ladder climbs above it.
+
+**The drawn-structure detector is not yet dependable.** It cannot reliably tell a
+real signal apart from ship noise, so do not read anything into it either way.
 
 The period reading under SIGNAL is the one to act on. It is the measurement that
 has been checked against a real recording of a known signal.
@@ -111,8 +115,8 @@ detected the same way.
 
 Flying with it is harder than analysing a clean recording. Pointed at a real
 signal in the black it will draw around what it finds and light SIGNAL, but it
-will not always name what it has found, and the STRUCTURE lamp is not yet
-dependable. This is why it is a pre-release.
+will not always name what it has found, and its drawn-structure detection is not
+yet dependable. This is why it is a pre-release.
 
 It costs a fraction of one CPU core and about 40 MB, so you can leave it
 running.
