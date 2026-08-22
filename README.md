@@ -34,7 +34,7 @@ flying you'd normally use the cockpit overlay instead.</sub>
 ## Install
 
 **[⬇ Download the latest release](../../releases)** — run
-`ED-Compass-Setup-0.3.0.exe` and you're done. No administrator rights, nothing else to
+`ED-Compass-Setup-0.4.2.exe` and you're done. No administrator rights, nothing else to
 install.
 
 Windows will say *"unknown publisher"*. Click **More info → Run anyway**. That
