@@ -67,9 +67,9 @@ Three indicators, in the order you should trust them:
 
 | | |
 |---|---|
-| **SIGNAL** | Something recognised, named in the line beneath it. Two so far: the Landscape Signal, identified by its 109.5 s period, and a keyed transmission such as Thargoid Sensor Morse. Both were checked against real reference recordings, so a match means what it says. |
+| **SIGNAL** | The strongest thing it has. Either a signal it can name — the Landscape Signal by its period, or a keyed transmission such as Thargoid Sensor Morse — or a stroke it has traced across the spectrogram. The line beneath says which. |
 | **TRANSMIT** | Something is keying tones on and off, the way a transmission does. |
-| **STRUCTURE** | The spectrogram has thin diagonal strokes in it — something *drawn* rather than noise. |
+| **STRUCTURE** | Thin diagonal strokes in the spectrogram — something *drawn* rather than noise. Unproven: see the note below. |
 
 Beside them, a live spectrogram of what the game is playing. When something
 fires, the audio is saved automatically, tagged with the star system and
@@ -79,9 +79,9 @@ coordinates you were at.
 and it lights **blue** to say so. SIGNAL lights **green** — those are the ones
 checked against real reference recordings.
 
-STRUCTURE used to fire on ordinary ambience too. It no longer does — sustained
-tones and broadband transients are stripped out before the spectrogram is
-examined at all, and what ambience is made of is exactly those two things.
+**STRUCTURE is not yet trustworthy.** It does not reliably tell a real signal
+apart from ordinary ship noise, so treat a dark STRUCTURE lamp as meaning
+nothing either way. SIGNAL and the period reading are the ones to act on.
 
 ## Is this allowed?
 
@@ -93,13 +93,20 @@ only notices things you could have noticed yourself with headphones and patience
 
 ## Does it actually work?
 
-Yes, and you don't have to take our word for it. Given CMDR Serbanstein's
-published recording of the real Landscape Signal — one exact cycle, 109.63
-seconds — ED Compass measures **109.67 seconds at 0.98 confidence**, with no
-template and nothing to match against. It found the period from the audio alone.
+Partly, and it is worth knowing which parts.
 
-It costs about **a quarter of one percent of a CPU core** and 42 MB of memory, so
-you can leave it running.
+Given the community's published recording of the Landscape Signal, ED Compass
+recovers its period from the audio alone — no template, nothing to match
+against — and agrees with the figure Canonn documented. Keyed transmissions are
+detected the same way.
+
+Flying with it is harder than analysing a clean recording. Pointed at a real
+signal in the black it will draw around what it finds and light SIGNAL, but it
+will not always name what it has found, and the STRUCTURE lamp is not yet
+dependable. This is why it is a pre-release.
+
+It costs a fraction of one CPU core and about 40 MB, so you can leave it
+running.
 
 ## Finding something
 

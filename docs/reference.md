@@ -28,8 +28,8 @@ installed, or that you are building it yourself.
 CMDR Serbanstein's high-fidelity recording of the Landscape Signal, linked from
 [Canonn's codex entry](https://canonn.science/codex/cartographics/the-landscape-signal/),
 is exactly one cycle long. Run it through the tool and the period it reports
-agrees with the 109.5 seconds the community documented, having had no template
-for it and never having seen it:
+agrees with the period the community documented, having had no template for it
+and never having seen it:
 
 ```sh
 ed-compass --headless --input landscape_reference.flac --loop --duration 40
@@ -89,7 +89,7 @@ recovered by integrating along them.
 
 The period remains the most trustworthy discriminator of the three. Ship ambience
 readily produces keying scores and periods scattered across a wide range, while
-the genuine recording returns a stable 109.5 s at high confidence.
+the genuine recording returns a stable period at high confidence.
 
 ### Noise removal
 
