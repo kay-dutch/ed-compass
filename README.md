@@ -71,17 +71,26 @@ Three indicators, in the order you should trust them:
 | **TRANSMIT** | Something is keying tones on and off, the way a transmission does. |
 | **STRUCTURE** | Thin diagonal strokes in the spectrogram — something *drawn* rather than noise. Unproven: see the note below. |
 
-Beside them, a live spectrogram of what the game is playing. When something
-fires, the audio is saved automatically, tagged with the star system and
-coordinates you were at.
+Beside them, a live spectrogram of what the game is playing, marked up as it
+goes:
 
-**TRANSMIT also lights on ordinary ship ambience.** It is a hint, not a verdict,
-and it lights **blue** to say so. SIGNAL lights **green** — those are the ones
-checked against real reference recordings.
+* **Outlines** around anything it found — yellow where something crossed a
+  threshold, cyan around a stroke it followed across the picture.
+* **A strip along the bottom** showing when things happened, on the same
+  left-to-right timeline as the spectrogram above it. A lamp tells you about now;
+  the strip tells you about the last couple of minutes, so a detection that fired
+  while you were watching the instruments is still there when you look up.
 
-**STRUCTURE is not yet trustworthy.** It does not reliably tell a real signal
-apart from ordinary ship noise, so treat a dark STRUCTURE lamp as meaning
-nothing either way. SIGNAL and the period reading are the ones to act on.
+When something fires, the audio is saved automatically, tagged with the star
+system and coordinates you were at.
+
+**Two lamps are worth less than they look.** TRANSMIT also lights on ordinary
+ship ambience — it is a hint, not a verdict, and it lights blue to say so.
+STRUCTURE is not yet dependable at all: it cannot reliably tell a real signal
+apart from ship noise, so a dark STRUCTURE lamp means nothing either way.
+
+The period reading under SIGNAL is the one to act on. It is the measurement that
+has been checked against a real recording of a known signal.
 
 ## Is this allowed?
 
@@ -113,7 +122,7 @@ running.
 If you catch a signal nobody has catalogued, that's a find worth sharing.
 
 1. Note the system and where you were pointing.
-2. Export the spectrogram (**Export PNG** in the full view).
+2. Press **Export**. It saves the audio and the spectrogram image together.
 3. Take it to the [Canonn Research Group](https://canonn.science/) — they are the
    people who found the Landscape Signal in the first place.
 
@@ -124,10 +133,11 @@ observations accumulate into something you can triangulate from.
 ## Questions
 
 **Will it fill my disk?** No. Recordings are FLAC and capped (about 2 GB by
-default, roughly 350 captures). When it's full the *weakest* detections are
-cleaned up first, never the best ones, and the written record of every
-observation is kept regardless. There's a usage bar and a **clean up** button in
-the control panel.
+default, roughly 350 captures). When it's full the weakest automatic detections
+are cleaned up first, and **anything you kept yourself with Export is never
+touched**. The written record of every observation survives regardless, even
+after its audio is gone. There's a usage bar and a **clean up** button in the
+control panel.
 
 **Do I need 7.1 surround?** No. Direction finding is an optional extra that needs
 it; detection works fine in stereo, which is what almost everyone should use.
