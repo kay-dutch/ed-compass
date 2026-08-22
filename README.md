@@ -1,9 +1,9 @@
 # ED Compass
 
-![Status](https://img.shields.io/badge/STATUS-PRE--RELEASE%20WORK%20IN%20PROGRESS-critical?style=for-the-badge)
+![Status](https://img.shields.io/badge/STATUS-ALFA--RELEASE%20WORK%20IN%20PROGRESS-critical?style=for-the-badge)
 
 > [!IMPORTANT]
-> ## ⚠️ PRE-RELEASE — WORK IN PROGRESS
+> ## ⚠️ ALFA-RELEASE — WORK IN PROGRESS
 >
 > Detector thresholds, file formats and the interface are all still changing, so
 > anything ED Compass reports should be treated as provisional rather than
