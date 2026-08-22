@@ -1,8 +1,12 @@
 # Changelog
 
+## v0.4.5 — alpha
+
+* Simplified cleanup: clean-up button erases all recordings.
+
 ## v0.4.4 — alpha
 
-* Recordings are cleaned up oldest first. 
+* Simplified cleanup: Recordings are cleaned up oldest first. 
 * Bugfix: the overlay animation is smooth again. 0.4.3 made it judder.
 
 ## v0.4.3 — alpha

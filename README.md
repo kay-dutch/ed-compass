@@ -138,10 +138,11 @@ observations accumulate into something you can triangulate from.
 
 **Will it fill my disk?** No. Recordings are FLAC and capped (about 2 GB by
 default, roughly 350 captures). When it's full the **oldest** automatic
-recordings are cleaned up first, and **anything you kept yourself with Export is
-never touched**. The written record of every observation survives regardless,
-even after its audio is gone. There's a usage bar and a **clean up** button in
-the control panel.
+recordings are removed first, and **anything you kept yourself with Export goes
+last of all**. The written record of every observation survives regardless, even
+after its audio is gone. There's a usage bar in the control panel, and an **erase
+all** button for when you want the whole folder back at once — that one takes
+your Export-kept recordings too.
 
 **Do I need 7.1 surround?** No. Direction finding is an optional extra that needs
 it; detection works fine in stereo, which is what almost everyone should use.
