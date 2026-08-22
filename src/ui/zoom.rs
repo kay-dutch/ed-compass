@@ -31,10 +31,15 @@ use std::time::{Duration, Instant};
 /// How long an animation takes.
 ///
 /// Long enough to read as movement rather than a cut, short enough not to be
-/// something you wait through. The frequency axis is logarithmic, so the
-/// interpolation is too — moving linearly in hertz would crawl across the low
-/// end and race across the top.
-const ANIMATION: Duration = Duration::from_millis(450);
+/// something you wait through. It was 450 ms, which was fine in principle and
+/// wrong in practice: the overlay viewport repainted every 66 ms, so the move
+/// got seven frames and read as a glitch rather than a movement. The repaint
+/// rate is fixed separately; this is slower as well, because a cockpit is a
+/// place where sudden motion in the corner of your eye is a cost.
+///
+/// The frequency axis is logarithmic, so the interpolation is too — moving
+/// linearly in hertz would crawl across the low end and race across the top.
+const ANIMATION: Duration = Duration::from_millis(900);
 
 /// Padding applied either side of a detected band, in octaves.
 ///

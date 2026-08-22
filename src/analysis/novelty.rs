@@ -370,6 +370,7 @@ pub struct NoveltyDetector {
     geometry: FrameGeometry,
     background: BackgroundModel,
     threshold_db: f32,
+    noise_sigmas: f32,
     min_frames: usize,
     gap_frames: usize,
     /// Bins excluded by the configured ignore bands.
@@ -399,6 +400,7 @@ impl NoveltyDetector {
                 cfg.background_max_freeze_seconds,
             ),
             threshold_db: cfg.novelty_threshold_db,
+            noise_sigmas: cfg.novelty_sigmas.max(0.0),
             min_frames: geometry.seconds_to_frames(cfg.min_event_seconds),
             gap_frames: geometry.seconds_to_frames(cfg.event_gap_tolerance_seconds),
             ignored: vec![false; bins],
@@ -504,9 +506,8 @@ impl NoveltyDetector {
             // detector against an 8 dB threshold — and how wide it is differs
             // from band to band, so a single fixed number cannot serve both a
             // quiet bin and a busy one.
-            const NOISE_SIGMAS: f32 = 3.0;
             let spread = self.background.spread_db().get(bin).copied().unwrap_or(0.0);
-            let bar = self.threshold_db.max(NOISE_SIGMAS * spread);
+            let bar = self.threshold_db.max(self.noise_sigmas * spread);
             let hot = !self.ignored[bin] && excess.is_finite() && excess >= bar;
             match (hot, start) {
                 (true, None) => start = Some(bin),

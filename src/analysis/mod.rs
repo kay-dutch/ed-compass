@@ -14,3 +14,4 @@ pub mod spectrogram;
 pub mod statistics;
 pub mod stft;
 pub mod structure;
+pub mod trace;

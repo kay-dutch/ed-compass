@@ -101,6 +101,15 @@ pub struct DetectorSidecar {
     pub keying_tones_hz: Vec<f32>,
     pub keying_symbol_rate_hz: Option<f32>,
     pub structure_score: f32,
+    /// What the *folded* cycle scored, and the fold it came from.
+    ///
+    /// Recorded separately because the two can disagree completely, and when they
+    /// do the fold is the one that matters. A capture triggered by the fold used
+    /// to record `structure_score: 0.0` — the live scan's opinion — which made
+    /// the file look self-contradictory to anyone reading it afterwards.
+    pub folded_structure_score: f32,
+    pub folded_period_seconds: Option<f32>,
+    pub folded_cycles: Option<f32>,
     pub structure_coherence: f32,
     pub structure_sparsity: f32,
     pub structure_orientation_diversity: f32,

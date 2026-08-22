@@ -12,6 +12,7 @@
 use realfft::num_complex::Complex32;
 
 use crate::analysis::direction::{self, DirectionEstimate};
+use crate::analysis::fold;
 use crate::analysis::keying::{KeyingDetection, KeyingDetector};
 use crate::analysis::morse::{MorseDetection, MorseDetector};
 use crate::analysis::novelty::{DetectionEvent, FrameGeometry, NoveltyDetector};
@@ -20,6 +21,7 @@ use crate::analysis::spectrogram::{DbRange, LongTermSummarizer, SpectrogramHisto
 use crate::analysis::statistics::{HealthWindow, SignalStats, power_to_dbfs};
 use crate::analysis::stft::StftStream;
 use crate::analysis::structure::{StructureScanner, StructureScore};
+use crate::analysis::trace::{self, TraceResult};
 use crate::audio::format;
 use crate::audio::{PcmRing, StreamFormat};
 use crate::config::Config;
@@ -33,6 +35,22 @@ const PEAK_DECAY_PER_BLOCK: f32 = 0.99;
 /// A transmitted tone is a narrow spike; low-frequency rumble is a broad hill
 /// whose peak happens to be somewhere on top of it.
 const PROMINENCE_MIN_RATIO: f64 = 12.0;
+
+/// How often the fold is recomputed, in seconds.
+///
+/// The long-term tier gains one frame per second, so a fold repeated much sooner
+/// than this is re-deriving the same picture from almost the same data. The
+/// search is the expensive part — every candidate period is a full pass over an
+/// hour of history — so this is what keeps it affordable.
+const FOLD_INTERVAL_SECONDS: f32 = 30.0;
+
+/// Period range searched, in seconds. The Landscape Signal's 109.5 s sits well
+/// inside it, and the range is deliberately wider than any one known signal.
+const FOLD_MIN_PERIOD_SECONDS: f32 = 30.0;
+const FOLD_MAX_PERIOD_SECONDS: f32 = 600.0;
+
+/// Phase columns in the folded cycle, capped by the cycle's own frame count.
+const FOLD_PHASES: usize = 256;
 
 /// Frequency rows in the structure-scan image, log-spaced.
 const SCAN_ROWS: usize = 256;
@@ -73,6 +91,15 @@ fn log_scan_rows(
             (lo, hi.clamp(lo + 1, bins))
         })
         .collect()
+}
+
+/// A followed stroke, fixed to the analysis timeline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TracedStroke {
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    pub low_hz: f32,
+    pub high_hz: f32,
 }
 
 /// A detection with everything the writer and the UI need attached.
@@ -164,6 +191,20 @@ pub struct AnalysisEngine {
     /// repetitions.
     longterm_excess: SpectrogramHistory,
     excess_summarizer: LongTermSummarizer,
+    /// The best fold found so far, and what the structure metrics made of it.
+    ///
+    /// Folding is the only measure that has separated a real signal from real
+    /// ambience: the raw spectrogram scores a drawn signal and ordinary ship
+    /// noise about equally, while a fold at the right period keeps the signal and
+    /// averages the noise toward flat. It is computed here rather than on demand
+    /// because it needs the long-term tier, which only exists while the tool is
+    /// running — an exported capture is far too short to contain the cycles.
+    folded: Option<fold::Folded>,
+    folded_structure: StructureScore,
+    /// Frames until the next search. The tier grows at a frame per second, so
+    /// re-folding faster than this would re-derive the same answer.
+    fold_countdown: usize,
+    fold_interval: usize,
     /// Rolling health statistics, accumulated as audio arrives rather than by
     /// rescanning the ring.
     health: HealthWindow,
@@ -215,6 +256,22 @@ pub struct AnalysisEngine {
     /// images.
     scan_cleaned: Vec<u8>,
     scan_dims: (usize, usize),
+    /// Strokes followed across the cleaned scan image.
+    ///
+    /// Seeded on confident ink and followed down to a much weaker level, which
+    /// reaches the parts of a stroke no single-threshold test can: the bar that
+    /// finds a signal and the bar that follows one are different bars.
+    traced: TraceResult,
+    /// Followed strokes, pinned to the timeline.
+    ///
+    /// The tracer re-runs over a sliding scan image, so its own output is
+    /// relative to whatever window it last looked at. Drawing straight from that
+    /// made the outlines jump by a scan interval instead of sliding, rewrite
+    /// themselves every couple of seconds, and vanish the moment the stroke left
+    /// the window. A stroke is an observation about a *moment*, so it is recorded
+    /// once with the absolute time it happened at and then left alone — which is
+    /// what makes detection boxes behave, and this now behaves the same way.
+    traced_strokes: Vec<TracedStroke>,
     /// Precomputed bin range feeding each scan row.
     scan_rows: Vec<(usize, usize)>,
 
@@ -317,6 +374,10 @@ impl AnalysisEngine {
                 20.0,
                 frames_per_summary,
             ),
+            folded: None,
+            folded_structure: StructureScore::empty(),
+            fold_countdown: 0,
+            fold_interval: (frames_per_second * FOLD_INTERVAL_SECONDS).round().max(1.0) as usize,
             longterm_fps: frames_per_second / frames_per_summary as f32,
             health: HealthWindow::new(
                 cfg.health_window_seconds,
@@ -352,6 +413,8 @@ impl AnalysisEngine {
             scan_image: Vec::new(),
             scan_cleaned: Vec::new(),
             scan_dims: (0, 0),
+            traced: TraceResult::default(),
+            traced_strokes: Vec::new(),
             scan_rows: log_scan_rows(
                 bins,
                 format.sample_rate,
@@ -629,6 +692,7 @@ impl AnalysisEngine {
             if let Some(summary) = self.excess_summarizer.push(self.detector.excess_db()) {
                 self.longterm_excess.push_db(&summary);
             }
+            self.update_fold();
             if self.direction_finding {
                 self.accumulate_direction();
                 self.update_live_direction();
@@ -752,6 +816,22 @@ impl AnalysisEngine {
             self.scan_cleaned.clear();
             self.scan_cleaned.extend_from_slice(&cleaned);
             self.scan_dims = (columns, rows);
+            // Nothing is traced until the background model has settled and the
+            // scan image has filled.
+            //
+            // A field screenshot showed a clump of small outlines stranded at the
+            // very start of a session: traced in the first seconds, when the scan
+            // image was a handful of columns wide and the background model still
+            // had no idea what the room sounded like, then aged across the
+            // display as a permanent record of nothing. Waiting costs a few
+            // seconds of a session that runs for hours.
+            let warm = self.detector.background().is_warm();
+            let filled = columns >= SCAN_COLUMNS / 2;
+            self.traced = if warm && filled {
+                trace::trace(&cleaned, columns, rows)
+            } else {
+                TraceResult::default()
+            };
             let (score, x, y) = scanner.scan(&cleaned, columns, rows);
             // Integrating along candidate lines reaches strokes too faint to
             // become ink at all, which the tile sweep above cannot see.
@@ -764,7 +844,46 @@ impl AnalysisEngine {
             }
             self.structure = score;
             self.structure_tile = (x, y);
+            self.record_traced_strokes(columns, rows);
         }
+    }
+
+    /// Fold the long-term excess tier and score the result.
+    ///
+    /// Returns without doing anything until there are at least two cycles to
+    /// average, which for the Landscape Signal is about four minutes of
+    /// listening — so this is quiet at the start of a session and becomes more
+    /// sensitive the longer the ship sits still.
+    fn update_fold(&mut self) {
+        if self.fold_countdown > 0 {
+            self.fold_countdown -= 1;
+            return;
+        }
+        self.fold_countdown = self.fold_interval;
+
+        let Some(folded) = fold::search(
+            &self.longterm_excess,
+            self.longterm_fps,
+            FOLD_MIN_PERIOD_SECONDS,
+            FOLD_MAX_PERIOD_SECONDS,
+            FOLD_PHASES,
+        ) else {
+            return;
+        };
+        let image = folded.to_image();
+        self.folded_structure =
+            crate::analysis::structure::analyze(&image, folded.phases, folded.bands);
+        self.folded = Some(folded);
+    }
+
+    /// The averaged cycle, once there is enough history to make one.
+    pub fn folded(&self) -> Option<&fold::Folded> {
+        self.folded.as_ref()
+    }
+
+    /// What the structure metrics make of the folded cycle.
+    pub fn folded_structure(&self) -> &StructureScore {
+        &self.folded_structure
     }
 
     /// How far a bin stands above its own neighbourhood.
@@ -829,6 +948,80 @@ impl AnalysisEngine {
     /// Frequency span of the novelty events open right now, in Hz.
     /// What the structure detector sees: the scan image with sustained tones and
     /// broadband transients removed, as `(pixels, width, height)`.
+    /// Pin the strokes just traced to the timeline, ignoring ones already known.
+    ///
+    /// Each scan re-traces the same span, so most of what it finds has been seen
+    /// before. Re-recording it would redraw every outline on every scan; keeping
+    /// the first sighting means an outline appears once and then holds still,
+    /// ageing off the display like any other observation.
+    fn record_traced_strokes(&mut self, columns: usize, rows: usize) {
+        if columns == 0 || rows == 0 || self.scan_rows.is_empty() {
+            return;
+        }
+        let now = self.elapsed_seconds();
+        let per_column = (columns as f32 * self.geometry.frame_seconds()) as f64;
+        let per_column = per_column / columns as f64;
+        let hz_of = |row: usize| -> f32 {
+            let row = row.min(self.scan_rows.len() - 1);
+            let (lo, hi) = self.scan_rows[row];
+            (self.geometry.bin_hz(lo) + self.geometry.bin_hz(hi)) * 0.5
+        };
+
+        let min_columns =
+            (self.cfg.trace_min_seconds / self.geometry.frame_seconds()).max(1.0) as usize;
+
+        for track in &self.traced.tracks {
+            // Too brief, or it never went anywhere. Both are specks rather than
+            // strokes, and a waterfall full of specks is a waterfall nobody
+            // reads.
+            if track.len() < min_columns {
+                continue;
+            }
+            let (low, high) = (hz_of(track.y1), hz_of(track.y0));
+            if low <= 0.0 || high / low < self.cfg.trace_min_sweep {
+                continue;
+            }
+
+            let start = now - (columns - track.x0) as f64 * per_column;
+            let end = now - (columns - track.x1) as f64 * per_column;
+
+            // Already recorded? Overlapping in both time and frequency is the
+            // same stroke seen again, not a new one.
+            let known = self.traced_strokes.iter().any(|s| {
+                start < s.end_seconds && end > s.start_seconds && low < s.high_hz && high > s.low_hz
+            });
+            if known {
+                continue;
+            }
+            self.traced_strokes.push(TracedStroke {
+                start_seconds: start,
+                end_seconds: end,
+                low_hz: low,
+                high_hz: high,
+            });
+        }
+
+        // Forget anything that has scrolled off the longest view we draw.
+        let horizon = now - self.cfg.waterfall_seconds as f64 * 1.5;
+        self.traced_strokes.retain(|s| s.end_seconds >= horizon);
+    }
+
+    /// Strokes followed across the most recent scan image.
+    pub fn traced(&self) -> &TraceResult {
+        &self.traced
+    }
+
+    /// Frequency and time extent of each followed stroke, as
+    /// `(seconds_ago_start, seconds_ago_end, low_hz, high_hz)`.
+    ///
+    /// This is what a box should be drawn from. The event rectangles are drawn
+    /// from a novelty event's band, which on real recordings comes out as a
+    /// 387–2602 Hz smear covering most of the display; a followed stroke knows
+    /// its own extent.
+    pub fn traced_strokes(&self) -> &[TracedStroke] {
+        &self.traced_strokes
+    }
+
     pub fn scan_cleaned(&self) -> (&[u8], usize, usize) {
         (&self.scan_cleaned, self.scan_dims.0, self.scan_dims.1)
     }
@@ -1274,6 +1467,39 @@ mod tests {
             d.azimuth_deg.abs() < 3.0,
             "a centred source must read centred, got {:+.1}°",
             d.azimuth_deg
+        );
+    }
+
+    /// The behaviour a field report asked for: outlines that hold still.
+    ///
+    /// Strokes were being drawn straight from the tracer's own output, which is
+    /// relative to a scan window that slides. On screen that made them jump by a
+    /// scan interval rather than drift, rewrite themselves every couple of
+    /// seconds, and disappear when the stroke left the window. Recording each
+    /// sighting once, against absolute time, is what fixes all three.
+    #[test]
+    fn a_traced_stroke_is_recorded_once_and_keeps_its_place() {
+        let f = format(2, MASK_STEREO);
+        let mut engine = AnalysisEngine::new(fast_config(), f.clone());
+        let mut source = SyntheticSource::new(TestSignal::Picture, f, 0.0);
+        feed(&mut engine, &mut source, 40.0);
+
+        let first: Vec<_> = engine.traced_strokes().to_vec();
+        if first.is_empty() {
+            return; // nothing traced is a valid outcome; the invariant needs a stroke
+        }
+        // The most recent one, so the ageing horizon cannot claim it during the
+        // few seconds this test runs for.
+        let newest = *first
+            .iter()
+            .max_by(|a, b| a.end_seconds.total_cmp(&b.end_seconds))
+            .unwrap();
+
+        feed(&mut engine, &mut source, 6.0);
+        assert!(
+            engine.traced_strokes().contains(&newest),
+            "a stroke already recorded must keep its exact place rather than being \
+             re-derived against a window that has moved"
         );
     }
 

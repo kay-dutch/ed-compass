@@ -35,6 +35,19 @@
 
 use crate::analysis::spectrogram::SpectrogramHistory;
 
+/// Most candidate periods a search will try.
+///
+/// Each candidate is a full pass over the history, so this is the knob that
+/// decides whether the search is affordable in a live pipeline. An hour of
+/// history searched at the ideal resolution would be about 1500 candidates and
+/// a billion operations — not something a background tool should do while
+/// someone is flying.
+pub const MAX_CANDIDATES: usize = 192;
+
+/// How finely the winning neighbourhood is re-searched, as a fraction of the
+/// coarse step. See the refinement stage in [`search`].
+const REFINE_STEPS: usize = 128;
+
 /// One cycle, averaged over however many were available.
 #[derive(Debug, Clone)]
 pub struct Folded {
@@ -220,13 +233,67 @@ pub fn search(
 
     // Step finely enough that a cycle does not drift more than one phase bin
     // across the whole observation, which is what sets the resolution of any
-    // folding search.
+    // folding search — but bounded, because that ideal is unaffordable.
+    //
+    // An hour of history searched from 30 s to 600 s at the ideal step is about
+    // 1500 candidate periods, and each one is a full pass over the tier. That is
+    // a billion operations for a background tool, so the candidate count is
+    // capped and the step widened to fit. The cost is resolution: a signal whose
+    // period falls between two candidates folds slightly smeared. Since the fold
+    // is then handed to a detector rather than used to publish a period, a little
+    // smearing costs sensitivity rather than correctness.
     let cycles = span_seconds / max_period;
-    let step = (max_period / (phases as f32 * cycles.max(1.0))).max(0.05);
+    let ideal = (max_period / (phases as f32 * cycles.max(1.0))).max(0.05);
+    let span = max_period - min_period;
+    let step = ideal.max(span / MAX_CANDIDATES as f32);
 
+    let mut best = scan(history, fps, min_period, max_period, step, phases);
+
+    // Refine around the winner.
+    //
+    // Without this the search defeats itself: a fold stays sharp only while the
+    // period is right to about `P / (N * phases)`, which at 109.5 s over sixteen
+    // cycles is *sixty milliseconds*. The coarse scan steps in seconds, so a
+    // period good enough to win the first pass is still wrong enough to drag the
+    // last cycle tens of seconds out of phase — and the smearing gets worse the
+    // longer the session runs, which is the opposite of how folding is supposed
+    // to behave. Measured in the field: five cycles and sixteen cycles both
+    // scored nothing.
+    //
+    // Two stages cost one extra sweep and buy back the resolution: locate the
+    // neighbourhood coarsely, then walk it finely.
+    if let Some(coarse) = &best {
+        let centre = coarse.period_seconds;
+        let fine_step = (step / REFINE_STEPS as f32).max(0.001);
+        let refined = scan(
+            history,
+            fps,
+            (centre - step).max(min_period),
+            (centre + step).min(max_period),
+            fine_step,
+            phases,
+        );
+        if let Some(r) = refined
+            && r.sharpness() >= coarse.sharpness()
+        {
+            best = Some(r);
+        }
+    }
+    best
+}
+
+/// One sweep of candidate periods, keeping the sharpest fold.
+fn scan(
+    history: &SpectrogramHistory,
+    fps: f32,
+    from: f32,
+    to: f32,
+    step: f32,
+    phases: usize,
+) -> Option<Folded> {
     let mut best: Option<Folded> = None;
-    let mut period = min_period;
-    while period <= max_period {
+    let mut period = from;
+    while period <= to {
         if let Some(folded) = fold(history, fps, period, phases)
             && best
                 .as_ref()
@@ -355,6 +422,40 @@ mod tests {
         assert!(
             max > 200,
             "a faint fold must still reach the top of the range, peaked at {max}"
+        );
+    }
+
+    /// The failure the refinement stage exists for.
+    ///
+    /// A coarse-only search gets *worse* with more cycles, because the precision
+    /// a sharp fold needs scales with the number of cycles being stacked. This
+    /// checks the property that was violated in the field: more history must not
+    /// mean a worse answer.
+    #[test]
+    fn more_cycles_do_not_make_the_period_worse() {
+        let period = 109.5;
+        let mut rng = noise(0x2468);
+        // Long enough for the precision demand to bite: 30 cycles.
+        let h = history(3300, |band, t| {
+            let floor = rng(band, t);
+            let phase = (t as f32) % period;
+            if (10..14).contains(&band) && (20.0..32.0).contains(&phase) {
+                floor + 8.0
+            } else {
+                floor
+            }
+        });
+        let found = search(&h, 1.0, 30.0, 600.0, 256).expect("a fold");
+        assert!(
+            (found.period_seconds - period).abs() <= 1.0,
+            "expected about {period} s over {:.0} cycles, found {:.2} s",
+            found.cycles,
+            found.period_seconds
+        );
+        assert!(
+            found.cycles > 25.0,
+            "should be stacking the whole history, got {:.1} cycles",
+            found.cycles
         );
     }
 

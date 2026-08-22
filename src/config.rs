@@ -43,7 +43,15 @@ impl IgnoreBand {
 ///    a ring holding every channel. Elite does not pan the signals this tool
 ///    hunts, so pan law reports centre forever. Still worth turning on for a
 ///    real 7.1 endpoint, which is a different measurement.
-pub const OVERLAY_LAYOUT_REVISION: u32 = 7;
+/// 8: the overlay zoom off. It is the only thing in the panel that moves, and
+///    the timeline strip along the bottom of the spectrogram now carries the
+///    "something happened" signal without disturbing anything. A value of
+///    `true` in an existing file came from the old default rather than from
+///    anyone choosing it.
+/// 9: the SIGNAL hold down to fifteen seconds. Thirty read as a lamp that was
+///    stuck rather than one reporting, now that the timeline strip carries the
+///    longer history.
+pub const OVERLAY_LAYOUT_REVISION: u32 = 9;
 
 /// Whether files can actually be created in a directory.
 ///
@@ -246,6 +254,13 @@ pub struct Config {
     /// a handful of rows of it. The waterfall keeps every bin at full resolution
     /// and the displayed band is only a render parameter, so narrowing it shows
     /// detail that was never on screen rather than magnifying what was.
+    ///
+    /// **Off by default.** It is the only thing in the overlay that moves, and
+    /// the timeline strip along the bottom of the spectrogram now does the job
+    /// the zoom was mostly doing — telling you something happened — without
+    /// disturbing anything. Motion in the corner of your eye while flying is a
+    /// cost, and this earns it back only when a signal is narrow enough that the
+    /// extra rows genuinely reveal something. Turn it on if that is your case.
     #[serde(default = "default_true")]
     pub overlay_zoom_on_detection: bool,
     /// How long the zoomed view is kept after the last detection ends.
@@ -283,6 +298,60 @@ pub struct Config {
 
     // ---- novelty detection ----
     pub novelty_threshold_db: f32,
+    /// How many times a bin's own spread an excursion must reach to count.
+    ///
+    /// The detection bar is whichever is larger, `novelty_threshold_db` or this
+    /// many times the bin's measured spread — so on a noisy band the tool asks
+    /// for more evidence than on a quiet one, which is what lets one setting work
+    /// across different ships and locations.
+    ///
+    /// It also means `novelty_threshold_db` has no effect wherever the spread
+    /// dominates, which on real recordings is most of the time. If the tool is
+    /// missing something you can see, this is the setting to lower.
+    ///
+    /// It was 3.0, and measured across four real recordings that produced
+    /// **zero** detections — once the band bug was fixed, nothing in the
+    /// detection band ever reached three sigma and the panel went dark
+    /// permanently. At 2.0 the same recordings produce events, including three
+    /// in the Landscape Signal's own band on a capture where it was visible.
+    /// Silence is the expensive failure for a tool meant to point at things
+    /// nobody has catalogued.
+    ///
+    /// Below about 1.5 it saturates rather than growing more sensitive: every
+    /// bin reads hot, the whole session merges into one event that never closes,
+    /// and nothing is reported at all.
+    #[serde(default = "default_novelty_sigmas")]
+    pub novelty_sigmas: f32,
+    /// How long the SIGNAL lamp stays lit after something triggers it.
+    ///
+    /// Without a hold the lamp reports the *instant*, and the instant is often
+    /// gone before anyone looks up from flying — a period match that dips below
+    /// its confidence gate for one update, or a stroke traced once and not
+    /// again, flashes and vanishes.
+    ///
+    /// Fifteen seconds: long enough to glance across the cockpit, short enough
+    /// that the lamp still describes roughly now. It was thirty, which in the
+    /// air felt like the lamp was stuck rather than reporting. The timeline strip
+    /// carries the longer history, so the lamp does not have to.
+    #[serde(default = "default_signal_hold")]
+    pub signal_hold_seconds: f32,
+    /// Shortest followed stroke worth drawing, in seconds.
+    ///
+    /// Measured on captures where the Landscape Signal was visible, real strokes
+    /// ran 2.6–3.2 s. Raise this if the waterfall fills with small outlines.
+    #[serde(default = "default_trace_min_seconds")]
+    pub trace_min_seconds: f32,
+    /// How far a stroke must travel in frequency to count, as a ratio.
+    ///
+    /// A drawn stroke sweeps; the real ones measured swept by about 1.7x. A
+    /// value of 1.0 accepts anything, including a flat line — which is a held
+    /// tone rather than a drawing.
+    ///
+    /// Set conservatively on purpose. An earlier detector required a minimum
+    /// *slope* and in doing so excluded the Landscape Signal's own ridges, so
+    /// this asks only that a stroke go somewhere, not that it go steeply.
+    #[serde(default = "default_trace_min_sweep")]
+    pub trace_min_sweep: f32,
     pub background_time_constant_seconds: f32,
     /// How long a bin may stay above its background before the model gives up
     /// and adapts anyway. Must comfortably exceed the longest signal we expect
@@ -318,6 +387,22 @@ pub struct Config {
     pub journal_enabled: bool,
     /// Empty means the default `%USERPROFILE%\Saved Games\...` location.
     pub journal_path: String,
+}
+
+fn default_trace_min_seconds() -> f32 {
+    2.0
+}
+
+fn default_trace_min_sweep() -> f32 {
+    1.15
+}
+
+fn default_signal_hold() -> f32 {
+    15.0
+}
+
+fn default_novelty_sigmas() -> f32 {
+    3.0
 }
 
 fn default_true() -> bool {
@@ -402,7 +487,7 @@ impl Default for Config {
             overlay_height: 104.0,
             overlay_spectrogram: true,
             overlay_spectrogram_seconds: 140.0,
-            overlay_zoom_on_detection: true,
+            overlay_zoom_on_detection: false,
             overlay_zoom_hold_seconds: 15.0,
             overlay_zoom_lockout_seconds: 30.0,
             export_dir: None,
@@ -411,6 +496,10 @@ impl Default for Config {
             export_height: 1600,
 
             novelty_threshold_db: 8.0,
+            novelty_sigmas: 2.0,
+            signal_hold_seconds: 15.0,
+            trace_min_seconds: 2.0,
+            trace_min_sweep: 1.15,
             background_time_constant_seconds: 60.0,
             background_max_freeze_seconds: 300.0,
             min_event_seconds: 2.0,
@@ -524,6 +613,8 @@ impl Config {
         // over from an older default was never anyone's choice, so the migration
         // takes it too.
         self.direction_finding = d.direction_finding;
+        self.overlay_zoom_on_detection = d.overlay_zoom_on_detection;
+        self.signal_hold_seconds = d.signal_hold_seconds;
         self.overlay_fit_between_plotters = d.overlay_fit_between_plotters;
         self.overlay_width = d.overlay_width;
         self.overlay_height = d.overlay_height;
@@ -853,13 +944,14 @@ mod tests {
         "overlay_height",
         "overlay_fit_between_plotters",
         "direction_finding",
+        "overlay_zoom_on_detection",
+        "signal_hold_seconds",
         "overlay_layout_revision",
     ];
 
     /// Settings that belong to whoever edited the file. Their defaults may
     /// change, but an existing config keeps whatever it says.
     const USER_OWNED: &[&str] = &[
-        "overlay_zoom_on_detection",
         "overlay_zoom_hold_seconds",
         "overlay_zoom_lockout_seconds",
         "device",
@@ -892,6 +984,9 @@ mod tests {
         "export_match_published_aspect",
         "export_height",
         "novelty_threshold_db",
+        "novelty_sigmas",
+        "trace_min_seconds",
+        "trace_min_sweep",
         "background_time_constant_seconds",
         "background_max_freeze_seconds",
         "min_event_seconds",

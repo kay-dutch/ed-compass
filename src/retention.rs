@@ -28,6 +28,13 @@ pub struct Record {
     pub value: f32,
 }
 
+/// Value given to a capture taken by hand.
+///
+/// Above anything a detector can produce — the maximum from a scored capture is
+/// two, one for the score and one for a Landscape match — so a deliberate
+/// capture is never evicted while any automatic one remains.
+const MANUAL_VALUE: f32 = 1000.0;
+
 /// How much to keep, and how much of it to protect.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Policy {
@@ -93,7 +100,21 @@ pub fn evictions(records: &[Record], policy: &Policy) -> Vec<usize> {
 /// gets a full point on top, which puts it above anything scored on confidence
 /// alone — a period match is the one measurement here that has been checked
 /// against a known recording, so it is the one worth protecting hardest.
+///
+/// **A capture someone took by hand outranks all of it.** Ranking by detector
+/// score alone had the effect exactly backwards: a manual capture scores what the
+/// detectors made of it, which for a signal they cannot see is 0.000, so the
+/// files a person deliberately chose to keep sorted to the bottom and were
+/// deleted first. That is not a hypothetical — it evicted the only recording this
+/// project had of a real signal, taken while a commander was looking straight at
+/// it, because the software disagreed with them. When a human and a detector
+/// disagree about what is worth keeping, the human is the one who has been right
+/// so far.
 pub fn value_of(json: &serde_json::Value) -> f32 {
+    if json.get("reason").and_then(|v| v.as_str()) == Some("manual") {
+        return MANUAL_VALUE;
+    }
+
     let num = |key: &str| json.get(key).and_then(|v| v.as_f64()).map(|v| v as f32);
 
     let best = [
@@ -279,6 +300,36 @@ pub fn enforce_simple_budget(dir: &Path, extension: &str, budget_bytes: u64) -> 
 
 #[cfg(test)]
 mod tests {
+
+    /// The eviction that cost this project its only real recording of a signal.
+    ///
+    /// A capture taken by hand records what the *detectors* made of the audio,
+    /// which for a signal they cannot see is zero. Ranked on that alone it sorts
+    /// below every automatic capture of ship noise, and the disk budget deletes
+    /// it first — which is what happened, to a recording made while a commander
+    /// was looking straight at the signal.
+    #[test]
+    fn a_hand_taken_capture_outranks_every_automatic_one() {
+        let manual: serde_json::Value = serde_json::json!({
+            "reason": "manual",
+            "structure_score": 0.0,
+            "keying_confidence": null,
+            "matches_landscape": false,
+        });
+        let confident: serde_json::Value = serde_json::json!({
+            "reason": "structure",
+            "score": 1.0,
+            "structure_score": 1.0,
+            "keying_confidence": 1.0,
+            "matches_landscape": true,
+        });
+        assert!(
+            value_of(&manual) > value_of(&confident),
+            "a deliberate capture ({}) must outrank the best automatic one ({})",
+            value_of(&manual),
+            value_of(&confident)
+        );
+    }
     use super::*;
     use std::time::Duration;
 

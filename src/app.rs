@@ -129,6 +129,17 @@ pub struct App {
     /// only indicator that reliably separates the real signal from ship
     /// ambience — structure and keying both overlap with it.
     landscape_present: bool,
+    /// When SIGNAL was last triggered, and how far along the traced strokes had
+    /// got at that point.
+    ///
+    /// The lamp latches from this rather than reporting whatever is true this
+    /// millisecond. A detection is an event — it happened — and a lamp that
+    /// un-lights the moment a confidence dips below its gate reports the gate
+    /// rather than the signal.
+    signal_since: Option<Instant>,
+    /// End time of the newest stroke already counted, so the same one does not
+    /// re-trigger on every scan.
+    last_stroke_end: f64,
 }
 
 impl App {
@@ -180,6 +191,8 @@ impl App {
             structure_present: false,
             keying_suspect: false,
             landscape_present: false,
+            signal_since: None,
+            last_stroke_end: f64::NEG_INFINITY,
         }
     }
 
@@ -305,11 +318,42 @@ impl App {
     /// by its period and Thargoid Sensor Morse by its dot/dash ratio; both mean
     /// "something known is transmitting", so both light the same indicator and
     /// the detail line says which.
+    /// Is SIGNAL lit?
+    ///
+    /// True while anything has triggered it within `signal_hold_seconds`. See
+    /// [`App::signal_since`] for why it latches rather than reporting the
+    /// instant.
     pub fn signal_present(&self) -> bool {
-        self.landscape_present
-            || self
-                .morse()
-                .is_some_and(|m| m.is_present(self.cfg.morse_threshold))
+        self.signal_since.is_some_and(|at| {
+            at.elapsed() < Duration::from_secs_f32(self.cfg.signal_hold_seconds.max(0.0))
+        })
+    }
+
+    /// What is triggering SIGNAL right now, ignoring the hold.
+    fn signal_triggered(&mut self) -> bool {
+        let morse = self
+            .morse()
+            .is_some_and(|m| m.is_present(self.cfg.morse_threshold));
+
+        // A stroke the tracer followed counts as much as a period match. It is
+        // the strongest visual evidence the tool produces: seeded on confident
+        // ink and followed down to a level no single-threshold test can reach.
+        let newest = self
+            .engine
+            .as_ref()
+            .map(|e| {
+                e.traced_strokes()
+                    .iter()
+                    .map(|s| s.end_seconds)
+                    .fold(f64::NEG_INFINITY, f64::max)
+            })
+            .unwrap_or(f64::NEG_INFINITY);
+        let new_stroke = newest.is_finite() && newest > self.last_stroke_end;
+        if new_stroke {
+            self.last_stroke_end = newest;
+        }
+
+        self.landscape_present || morse || new_stroke
     }
 
     /// The current period estimate, for display.
@@ -330,7 +374,24 @@ impl App {
         let keying = engine
             .keying()
             .is_some_and(|k| k.is_present(self.cfg.keying_threshold));
-        let structure = engine.structure().is_present(self.cfg.structure_threshold);
+        // Two routes to the same claim, and the folded one is the only one that
+        // has ever worked on real audio.
+        //
+        // The live scan reads the last few seconds of spectrogram, which on real
+        // recordings scores drawn signals and ordinary ship ambience about
+        // equally. The fold averages an hour of the excess tier against its own
+        // period: a signal that repeats survives, and ambience — which does not
+        // repeat — averages toward flat. Measured, the fold scored a synthetic
+        // Landscape at 0.54 while two real ambience recordings scored 0.000.
+        //
+        // Either is allowed to light the lamp. The fold needs several cycles
+        // before it says anything at all, so it is silent early in a session and
+        // grows more sensitive the longer the ship sits still.
+        let live_structure = engine.structure().is_present(self.cfg.structure_threshold);
+        let folded_structure = engine
+            .folded_structure()
+            .is_present(self.cfg.structure_threshold);
+        let structure = live_structure || folded_structure;
 
         // Music is the keying detector's main false positive, so a detection
         // made while a track is selected is marked suspect in the display.
@@ -339,6 +400,10 @@ impl App {
         self.landscape_present = engine.periodicity().is_some_and(|p| {
             crate::analysis::periodicity::matches_landscape(&p, LANDSCAPE_TOLERANCE_SECONDS)
         });
+
+        if self.signal_triggered() {
+            self.signal_since = Some(Instant::now());
+        }
 
         // Keep the audio on the *rising edge*. The primary detectors used to
         // light up without recording anything, because only the novelty-event
@@ -425,6 +490,9 @@ impl App {
                 .unwrap_or_default(),
             keying_symbol_rate_hz: keying.as_ref().map(|k| k.symbol_rate_hz),
             structure_score: structure.score,
+            folded_structure_score: engine.folded_structure().score,
+            folded_period_seconds: engine.folded().map(|f| f.period_seconds),
+            folded_cycles: engine.folded().map(|f| f.cycles),
             structure_coherence: structure.coherence,
             structure_sparsity: structure.sparsity,
             structure_orientation_diversity: structure.orientation_diversity,

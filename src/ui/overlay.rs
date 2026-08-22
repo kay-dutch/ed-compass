@@ -313,6 +313,28 @@ pub struct OverlayState {
     /// ("Texture with 'egui_texid_Managed(3)' label is invalid"). The overlay
     /// uploads these pixels inside its own pass and owns the result.
     pub spectrogram: Option<egui::ColorImage>,
+    /// Followed strokes, in coordinates normalised to the spectrogram image:
+    /// `(0,0)` is its top-left, `(1,1)` its bottom-right.
+    ///
+    /// Normalised rather than in hertz and seconds because the overlay does not
+    /// know what band it is showing — the zoom moves it — and the parent that
+    /// built the image does. Passing rectangles it can draw directly keeps the
+    /// two from having to agree about anything.
+    pub strokes: Vec<egui::Rect>,
+    /// True while the band is moving, so the overlay knows to repaint faster.
+    ///
+    /// The overlay viewport otherwise refreshes about fifteen times a second,
+    /// which is plenty for lamps and hopeless for motion — an animation drawn at
+    /// that rate reads as stepping.
+    pub animating: bool,
+    /// What the lamps were doing across the spectrogram's own time window,
+    /// oldest first, one entry per slice.
+    ///
+    /// A lamp reports the present, and the present is easy to miss while flying.
+    /// This is the same information laid along the time axis, so a detection that
+    /// happened while you were looking elsewhere is still on screen next to the
+    /// spectrogram row that caused it.
+    pub timeline: Vec<Option<Rung>>,
     /// False when the overlay window is open but should show nothing. The
     /// window is never closed — see `CompassUi::sync_overlay` — so this is what
     /// makes it invisible.
@@ -350,7 +372,11 @@ impl OverlayState {
             .and_then(|e| e.keying())
             .map(|k| k.confidence)
             .unwrap_or(0.0);
-        let structure_score = app.engine().map(|e| e.structure().score).unwrap_or(0.0);
+        // Whichever route sees more. The fold is usually the one that does.
+        let structure_score = app
+            .engine()
+            .map(|e| e.structure().score.max(e.folded_structure().score))
+            .unwrap_or(0.0);
         let morse_confidence = app.morse().map(|m| m.confidence).unwrap_or(0.0);
         let period_confidence = app
             .periodicity()
@@ -387,6 +413,10 @@ impl OverlayState {
             cypher_detail,
             signal_detail: period_detail(app),
             spectrogram: None,
+            // Set by the caller, which owns the band the image was drawn at.
+            strokes: Vec::new(),
+            animating: false,
+            timeline: Vec::new(),
             // Set by the caller, which owns the visibility decision.
             showing: false,
             attention: OverlayAttention::of(app.status()),
@@ -828,6 +858,75 @@ mod tests {
         assert_eq!(Rung::of(false, false, true), Some(Rung::Signal));
         assert_eq!(Rung::of(false, true, false), Some(Rung::Cypher));
         assert_eq!(Rung::of(false, false, false), None);
+    }
+
+    /// The overlay and the main window must agree about what was found.
+    ///
+    /// They draw from different sources — the main window from the engine, the
+    /// overlay from a snapshot copied across a viewport boundary — so it is
+    /// possible for one to show a stroke the other does not. The rectangles are
+    /// carried normalised precisely so the overlay never has to know the band,
+    /// which the zoom moves underneath it.
+    /// The timeline must not lose a brief detection.
+    ///
+    /// Each slice covers a span of time, and a two-second detection inside a
+    /// mostly-quiet slice is exactly the thing worth seeing. Taking the strongest
+    /// rung in a slice rather than the last or the average is what makes the
+    /// strip useful rather than decorative.
+    #[test]
+    fn a_brief_detection_survives_being_resampled() {
+        // A slice that was mostly dark, with one moment of SIGNAL in it.
+        let samples = [
+            None,
+            Some(Rung::Anomaly),
+            Some(Rung::Signal),
+            Some(Rung::Anomaly),
+            None,
+        ];
+        let strongest = samples.iter().copied().fold(
+            None,
+            |acc: Option<Rung>, r| {
+                if r > acc { r } else { acc }
+            },
+        );
+        assert_eq!(
+            strongest,
+            Some(Rung::Signal),
+            "the strongest rung in a slice is what the strip must show"
+        );
+    }
+
+    /// The ladder's ordering is what makes "strongest" meaningful.
+    #[test]
+    fn rungs_order_from_weakest_to_strongest() {
+        assert!(Some(Rung::Anomaly) > None);
+        assert!(Some(Rung::Cypher) > Some(Rung::Anomaly));
+        assert!(Some(Rung::Signal) > Some(Rung::Cypher));
+    }
+
+    #[test]
+    fn strokes_cross_to_the_overlay_as_normalised_rectangles() {
+        let mut state = OverlayState {
+            strokes: vec![egui::Rect::from_min_max(
+                egui::pos2(0.25, 0.10),
+                egui::pos2(0.40, 0.60),
+            )],
+            ..Default::default()
+        };
+        // Normalised means every coordinate is inside the unit square, whatever
+        // band or window the parent happened to be drawing.
+        for r in &state.strokes {
+            assert!(
+                r.min.x >= 0.0 && r.max.x <= 1.0 && r.min.y >= 0.0 && r.max.y <= 1.0,
+                "outside the image: {r:?}"
+            );
+            assert!(r.max.x >= r.min.x && r.max.y >= r.min.y, "inverted: {r:?}");
+        }
+        // And they survive the copy the viewport callback makes.
+        let copied = state.clone();
+        assert_eq!(copied.strokes, state.strokes);
+        state.strokes.clear();
+        assert_eq!(copied.strokes.len(), 1, "the copy must be independent");
     }
 
     #[test]

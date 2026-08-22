@@ -10,6 +10,7 @@ use eframe::egui;
 
 use crate::analysis::novelty::FrameGeometry;
 use crate::analysis::spectrogram::SpectrogramHistory;
+use crate::ui::overlay::Rung;
 
 /// Lowest frequency drawn by default. Below this is mains hum and DC.
 pub const DEFAULT_MIN_HZ: f32 = 20.0;
@@ -431,6 +432,121 @@ pub fn draw_axes(painter: &egui::Painter, rect: egui::Rect, scale: FreqScale, se
     );
 }
 
+/// Project timed spans onto a fixed number of slices across a time window.
+///
+/// `spans` are `(start_seconds, end_seconds, rung)` on the same clock as `now`.
+/// The result runs oldest first, one entry per slice, each holding the strongest
+/// rung that overlaps it.
+///
+/// Pulled out of the drawing code and given tests because the version written
+/// inline stopped marking anything at all, and inline arithmetic inside a
+/// closure is where that kind of mistake hides.
+pub fn project_spans(
+    now: f64,
+    window_seconds: f64,
+    slices: usize,
+    spans: &[(f64, f64, Rung)],
+) -> Vec<Option<Rung>> {
+    let mut out = vec![None; slices];
+    if slices == 0 || window_seconds <= 0.0 {
+        return out;
+    }
+    let oldest = now - window_seconds;
+    for &(from, to, rung) in spans {
+        let (from, to) = (from.min(to), from.max(to));
+        // Anything wholly outside the window is not drawn; anything overlapping
+        // it is clipped, so a long detection does not vanish while it is still
+        // partly on screen.
+        if to < oldest || from > now {
+            continue;
+        }
+        let position = |t: f64| -> usize {
+            let clamped = t.clamp(oldest, now);
+            let fraction = (clamped - oldest) / window_seconds;
+            ((fraction * (slices - 1) as f64).round() as usize).min(slices - 1)
+        };
+        let (a, b) = (position(from), position(to));
+        for slot in out.iter_mut().take(b + 1).skip(a) {
+            if Some(rung) > *slot {
+                *slot = Some(rung);
+            }
+        }
+    }
+    out
+}
+
+/// Paint the lamp history into the bottom rows of a spectrogram image.
+///
+/// Into the *image*, not over it with the painter. The two were drawn on
+/// different clocks — the spectrogram rebuilt on the snapshot interval and
+/// cached, the strip repainted every frame — so they scrolled at different rates
+/// and the strip visibly lagged the rows it was describing. Baked into the same
+/// buffer they cannot disagree: one bitmap, formed together, displayed together.
+///
+/// `slices` runs oldest first and shares the image's own time axis, so a mark
+/// sits directly beneath the column that produced it.
+pub fn paint_timeline(image: &mut egui::ColorImage, slices: &[Option<Rung>]) {
+    if slices.is_empty() {
+        return;
+    }
+    const HEIGHT: usize = 5;
+    let [width, height] = [image.width(), image.height()];
+    if width == 0 || height <= HEIGHT {
+        return;
+    }
+    for x in 0..width {
+        let index = x * slices.len() / width;
+        let colour = match slices[index.min(slices.len() - 1)] {
+            Some(Rung::Signal) => egui::Color32::from_rgb(80, 255, 120),
+            Some(Rung::Cypher) => egui::Color32::from_rgb(77, 166, 255),
+            Some(Rung::Anomaly) => egui::Color32::from_rgb(177, 87, 0),
+            // Not black: a strip that disappears where nothing happened cannot
+            // be told apart from the spectrogram above it.
+            None => egui::Color32::from_gray(40),
+        };
+        for y in height - HEIGHT..height {
+            image[(x, y)] = colour;
+        }
+    }
+}
+
+/// Draw the lamp history as a strip along the bottom of a spectrogram.
+///
+/// `slices` runs oldest first and shares the spectrogram's own time axis, so a
+/// coloured mark sits directly beneath the rows that produced it. That
+/// alignment is the whole value: a lamp says something happened, this says
+/// *when*, against the picture.
+pub fn draw_timeline(painter: &egui::Painter, rect: egui::Rect, slices: &[Option<Rung>]) {
+    if slices.is_empty() {
+        return;
+    }
+    const HEIGHT: f32 = 5.0;
+    let strip = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), rect.bottom() - HEIGHT),
+        rect.right_bottom(),
+    );
+    let width = strip.width() / slices.len() as f32;
+    for (i, rung) in slices.iter().enumerate() {
+        let colour = match rung {
+            Some(Rung::Signal) => egui::Color32::from_rgb(80, 255, 120),
+            Some(Rung::Cypher) => egui::Color32::from_rgb(77, 166, 255),
+            Some(Rung::Anomaly) => egui::Color32::from_rgb(177, 87, 0),
+            // Not black: a strip that disappears where nothing happened cannot
+            // be told apart from the spectrogram above it.
+            None => egui::Color32::from_gray(40),
+        };
+        let x = strip.left() + i as f32 * width;
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(x, strip.top()),
+                egui::pos2(x + width.max(1.0), strip.bottom()),
+            ),
+            0.0,
+            colour,
+        );
+    }
+}
+
 /// One detection's extent on the waterfall, in time-ago and frequency.
 #[derive(Debug, Clone, Copy)]
 pub struct EventBox {
@@ -440,6 +556,13 @@ pub struct EventBox {
     pub high_hz: f32,
     /// Whether the audio was written to disk, which changes the outline colour.
     pub captured: bool,
+    /// A stroke the tracer followed, rather than a detected event.
+    ///
+    /// Drawn differently on purpose: an event box says "something crossed a
+    /// threshold in this band", which on real recordings covers most of the
+    /// display, while a traced stroke is the extent of one followed line. They
+    /// are different claims and should not look alike.
+    pub traced: bool,
 }
 
 /// Outline a detected event on the waterfall.
@@ -456,6 +579,7 @@ pub fn draw_event_box(
         low_hz,
         high_hz,
         captured,
+        traced,
     } = event;
     if window_seconds <= 0.0 || seconds_ago_start > window_seconds {
         return;
@@ -469,7 +593,10 @@ pub fn draw_event_box(
         egui::pos2(x_of(seconds_ago_start), y_top - 2.0),
         egui::pos2(x_of(seconds_ago_end), y_bottom + 2.0),
     );
-    let colour = if captured {
+    let colour = if traced {
+        // Cyan: not a threshold crossing, a line that was followed.
+        egui::Color32::from_rgb(90, 220, 255)
+    } else if captured {
         egui::Color32::from_rgb(120, 255, 160)
     } else {
         egui::Color32::from_rgb(255, 210, 90)
@@ -477,13 +604,92 @@ pub fn draw_event_box(
     painter.rect_stroke(
         box_rect,
         2.0,
-        egui::Stroke::new(1.5, colour),
+        egui::Stroke::new(if traced { 1.0 } else { 1.5 }, colour),
         egui::StrokeKind::Outside,
     );
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// Both halves of a field report: the strip stayed dark while a detection was
+    /// visible, then turned entirely green the moment that detection scrolled off
+    /// the left edge.
+    ///
+    /// One cause. Clamping each end of a span independently meant a span wholly
+    /// in the past had its start clamped to the first slice and its end to the
+    /// last — painting everything. And a span that failed to resolve was skipped
+    /// rather than clipped, so nothing was drawn while it was on screen.
+    #[test]
+    fn a_span_that_has_scrolled_away_marks_nothing() {
+        let now = 300.0;
+        let window = 140.0;
+        // Ended eighty seconds before the window even begins.
+        let gone = [(60.0, 80.0, Rung::Signal)];
+        let out = project_spans(now, window, 100, &gone);
+        assert!(
+            out.iter().all(|s| s.is_none()),
+            "a detection off the left edge must mark nothing, got {} marks",
+            out.iter().filter(|s| s.is_some()).count()
+        );
+    }
+
+    #[test]
+    fn a_visible_span_marks_its_own_place_and_nothing_else() {
+        let now = 300.0;
+        let window = 140.0;
+        // Ran from 54 s ago to 40 s ago. Oldest visible is 160 s, so it should
+        // land at (246-160)/140 = 61% through the strip and end at 71%.
+        let out = project_spans(now, window, 100, &[(246.0, 260.0, Rung::Signal)]);
+        let marked: Vec<usize> = out
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!marked.is_empty(), "a visible detection must be drawn");
+        let (first, last) = (marked[0], marked[marked.len() - 1]);
+        assert!(
+            (59..=63).contains(&first) && (69..=73).contains(&last),
+            "expected roughly slices 61..71, got {first}..{last}"
+        );
+    }
+
+    /// Partly off the edge is clipped, not dropped: a long detection must not
+    /// vanish while half of it is still on screen.
+    #[test]
+    fn a_span_hanging_off_the_edge_is_clipped() {
+        let out = project_spans(300.0, 140.0, 100, &[(100.0, 200.0, Rung::Anomaly)]);
+        assert_eq!(out[0], Some(Rung::Anomaly), "the visible part is drawn");
+        assert!(out.iter().any(|s| s.is_none()), "but only the visible part");
+    }
+
+    #[test]
+    fn the_strongest_rung_wins_where_spans_overlap() {
+        let out = project_spans(
+            300.0,
+            140.0,
+            100,
+            &[(250.0, 270.0, Rung::Anomaly), (255.0, 260.0, Rung::Signal)],
+        );
+        assert!(out.contains(&Some(Rung::Signal)));
+        assert!(out.contains(&Some(Rung::Anomaly)));
+    }
+
+    #[test]
+    fn degenerate_projections_are_empty_rather_than_wrong() {
+        assert!(project_spans(300.0, 140.0, 0, &[(1.0, 2.0, Rung::Signal)]).is_empty());
+        assert!(
+            project_spans(300.0, 0.0, 10, &[(1.0, 2.0, Rung::Signal)])
+                .iter()
+                .all(|s| s.is_none())
+        );
+        assert!(
+            project_spans(300.0, 140.0, 10, &[])
+                .iter()
+                .all(|s| s.is_none())
+        );
+    }
     use super::*;
     use crate::analysis::spectrogram::DbRange;
 

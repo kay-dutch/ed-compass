@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.4.1 — pre-release
+
+* **Captures you took by hand are no longer deleted.** When the disk filled, the
+  budget ranked recordings by what the detectors made of them — and a capture you
+  took deliberately, of something the software could not see, scores zero. So the
+  one file a person judged worth keeping was the first thing removed. It cost a
+  recording of a real signal before it was noticed. Manual captures now outrank
+  everything automatic. **This is the reason to update.**
+* **The detector had gone silent.** Once detection was confined to the configured
+  band, nothing in that band ever cleared the noise bar, and across four real
+  recordings it produced no detections at all. There is now a `novelty_sigmas`
+  setting, lowered by default, and the same recordings produce events again —
+  including in the band the Landscape Signal occupies.
+* **Faint strokes are followed rather than thresholded.** A new pass seeds on
+  confident ink and follows a line down to a much weaker level, which reaches
+  parts of a stroke no single threshold can. Followed strokes are outlined on the
+  waterfall and in the overlay.
+* **A timeline strip** along the bottom of both spectrograms, showing when
+  detections happened on the same axis as the picture that produced them. A lamp
+  tells you about now; this tells you about the last two minutes.
+* SIGNAL now stays lit for fifteen seconds after something triggers it, instead
+  of reporting only the instant.
+* Repeating signals are searched for by folding the long-term view against its
+  own period — the technique radio astronomy uses for pulsars.
+* A new icon, and the overlay zoom is off by default.
+
 ## v0.4.0 — pre-release
 
 * The overlay zooms into what it finds.

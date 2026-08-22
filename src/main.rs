@@ -621,6 +621,41 @@ fn run_headless(
             );
             println!();
         }
+        if let Some(engine) = app.engine() {
+            {
+                // What the pipeline actually recorded, not a fresh trace of the
+                // same pixels: the pipeline suppresses tracing until the
+                // background is warm, and a diagnostic that ignores that reports
+                // strokes the app never saw.
+                let t = engine.traced();
+                for tk in t.tracks.iter().take(12) {
+                    println!(
+                        "    track {:>3} cols  rows {:>3}..{:<3} drift {:>3}  mean {:.0}",
+                        tk.len(),
+                        tk.y0,
+                        tk.y1,
+                        tk.drift_rows(),
+                        tk.mean
+                    );
+                }
+                println!(
+                    "Traced strokes: {} tracks, longest {:.0}% covered {:.0}% (seed {} follow {})",
+                    t.tracks.len(),
+                    t.longest * 100.0,
+                    t.covered * 100.0,
+                    t.seed_level,
+                    t.follow_level
+                );
+            }
+            let f = engine.folded_structure();
+            match engine.folded() {
+                Some(folded) => println!(
+                    "Folded cycle: {:.1} cycles at {:.1} s — structure {:.3} (continuity {:.2})",
+                    folded.cycles, folded.period_seconds, f.score, f.continuity
+                ),
+                None => println!("Folded cycle: not enough history yet (needs two cycles)"),
+            }
+        }
         println!(
             "Drawn structure (final): score {:.3} (coherence {:.2}, sparsity {:.2}, diversity {:.2}){}",
             snap.structure.score,

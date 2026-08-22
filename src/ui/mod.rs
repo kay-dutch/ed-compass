@@ -273,9 +273,15 @@ struct CompassUi {
     last_waterfall: Instant,
     /// Size the waterfall image was last built at, so it is rebuilt on resize.
     waterfall_size: [usize; 2],
-    /// What the last Export did, shown next to the button. A log line is no use
-    /// to someone in a cockpit who needs to know the moment was saved.
-    export_status: Option<String>,
+    /// What the last Export did, and when, shown next to the button. A log line
+    /// is no use to someone in a cockpit who needs to know the moment was saved.
+    ///
+    /// It expires rather than lingering. The message describes a moment that has
+    /// passed, and the honest lifetime is exactly as long as it stays true: once
+    /// the capture cooldown lapses, pressing Export would write a *new* file
+    /// instead of reporting the old one, so the old text no longer describes what
+    /// would happen and gets out of the way.
+    export_status: Option<(String, Instant)>,
 }
 
 impl CompassUi {
@@ -498,6 +504,15 @@ impl CompassUi {
                 target[0],
                 target[1],
             );
+            // The timeline goes into the same buffer, so it scrolls with the
+            // rows it describes rather than on its own clock.
+            let mut image = image;
+            // One slice per pixel. At three the strip could only move in
+            // three-pixel jumps while the spectrogram beneath it moved one at a
+            // time, and the mismatch is exactly what reads as juddering once the
+            // strip is bright enough to notice.
+            let slices = self.timeline_slices(window_seconds, target[0]);
+            waterfall::paint_timeline(&mut image, &slices);
             // Update in place. Assigning a fresh `load_texture` here dropped
             // the old handle, which queues a *free* into egui's global texture
             // delta — about eight per second at the snapshot rate. Two
@@ -530,12 +545,37 @@ impl CompassUi {
         }
         waterfall::draw_axes(&painter, rect, scale, window_seconds);
 
-        // Overlay recent detections.
+        // One clock for both kinds of outline, so they age together.
         let now_seconds = self
             .snapshot
             .as_ref()
             .map(|s| s.timeline_seconds)
             .unwrap_or(0.0);
+
+        // Strokes the tracer followed. Drawn first, so a detection box sits on
+        // top when the two describe the same thing.
+        if let Some(engine) = self.app.engine() {
+            for stroke in engine.traced_strokes() {
+                // Aged exactly like a detection box, from the same clock.
+                let ago_start = (now_seconds - stroke.start_seconds) as f32;
+                let ago_end = (now_seconds - stroke.end_seconds) as f32;
+                waterfall::draw_event_box(
+                    &painter,
+                    rect,
+                    scale,
+                    window_seconds,
+                    waterfall::EventBox {
+                        seconds_ago_start: ago_start,
+                        seconds_ago_end: ago_end.max(0.0),
+                        low_hz: stroke.low_hz,
+                        high_hz: stroke.high_hz,
+                        captured: false,
+                        traced: true,
+                    },
+                );
+            }
+        }
+
         for record in self.app.events().iter().rev().take(40) {
             let e = &record.detection.event;
             let ago_start = (now_seconds - e.start_seconds) as f32;
@@ -551,6 +591,7 @@ impl CompassUi {
                     low_hz: e.low_hz,
                     high_hz: e.high_hz,
                     captured: record.captured_to.is_some(),
+                    traced: false,
                 },
             );
         }
@@ -634,8 +675,16 @@ impl CompassUi {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(status) = &self.export_status {
-                    ui.label(egui::RichText::new(status).weak());
+                // Shown only while it still describes what another press would
+                // do. See `export_status`.
+                let linger =
+                    Duration::from_secs_f32(self.app.config().capture_cooldown_seconds.max(1.0));
+                match &self.export_status {
+                    Some((status, at)) if at.elapsed() < linger => {
+                        ui.label(egui::RichText::new(status).weak());
+                    }
+                    Some(_) => self.export_status = None,
+                    None => {}
                 }
             });
         });
@@ -706,6 +755,11 @@ impl CompassUi {
         // may render the child while the parent sleeps, and its docs call for
         // exactly this; a closure capturing a snapshot can only ever show the
         // state of the frame that built it.
+        // Computed before the shared state is locked: it needs `&mut self` for
+        // the zoom, and the lock borrows self immutably.
+        let strokes = self.overlay_strokes();
+        let animating = self.zoom.animating();
+        let timeline = self.overlay_timeline();
         {
             let mut shared = self.overlay_state.lock().unwrap();
             let pixels = shared.spectrogram.take();
@@ -723,6 +777,9 @@ impl CompassUi {
                 .as_ref()
                 .map(|s| s.direction)
                 .filter(|_| self.app.config().direction_finding);
+            shared.strokes = strokes;
+            shared.animating = animating;
+            shared.timeline = timeline;
         }
 
         // Hidden by opacity, the way SrvSurvey hides its plotters: the window
@@ -806,8 +863,116 @@ impl CompassUi {
                     }
                 });
             // Audio keeps arriving whether or not anything moves on screen.
-            ctx.request_repaint_after(Duration::from_millis(66));
+            // Frame rate, not buffering, is what makes motion smooth here.
+            //
+            // The spectrogram advances well under a pixel between rebuilds, so
+            // there is no content to double-buffer away — what was visible as
+            // stepping was the overlay repainting fifteen times a second. Sixty
+            // while anything moves, thirty at rest; a texture blit and a handful
+            // of shapes is cheap enough that the difference does not show up in
+            // the CPU figure.
+            let interval = if snapshot.animating { 16 } else { 33 };
+            ctx.request_repaint_after(Duration::from_millis(interval));
         });
+    }
+
+    /// Traced strokes as rectangles over the overlay's spectrogram, normalised
+    /// to it.
+    ///
+    /// Computed here rather than in the overlay because the band on screen is
+    /// whatever the zoom has settled on, and only this side knows it.
+    fn overlay_strokes(&mut self) -> Vec<egui::Rect> {
+        let cfg = self.app.config();
+        if !cfg.overlay_spectrogram {
+            return Vec::new();
+        }
+        let window = cfg.overlay_spectrogram_seconds.max(1.0);
+        let now = self
+            .snapshot
+            .as_ref()
+            .map(|s| s.timeline_seconds)
+            .unwrap_or(0.0);
+        let band = self.zoom.band(Instant::now());
+        let Some(engine) = self.app.engine() else {
+            return Vec::new();
+        };
+        let nyquist = engine.geometry().nyquist_hz();
+        let scale = waterfall::FreqScale::new(band.low_hz, band.high_hz, nyquist);
+
+        engine
+            .traced_strokes()
+            .iter()
+            .filter_map(|stroke| {
+                let ago_start = (now - stroke.start_seconds) as f32;
+                let ago_end = (now - stroke.end_seconds) as f32;
+                if ago_start > window {
+                    return None;
+                }
+                // Time runs left to right, oldest at the left edge.
+                let x0 = 1.0 - (ago_start / window).clamp(0.0, 1.0);
+                let x1 = 1.0 - (ago_end.max(0.0) / window).clamp(0.0, 1.0);
+                // `row` works in pixels, so ask it for a tall image and divide.
+                const ROWS: usize = 1000;
+                let y0 = scale.row(stroke.high_hz, ROWS) as f32 / ROWS as f32;
+                let y1 = scale.row(stroke.low_hz, ROWS) as f32 / ROWS as f32;
+                Some(egui::Rect::from_min_max(
+                    egui::pos2(x0.min(x1), y0.min(y1)),
+                    egui::pos2(x0.max(x1), y0.max(y1)),
+                ))
+            })
+            .collect()
+    }
+
+    /// The lamp history, resampled onto the overlay spectrogram's time axis.
+    ///
+    /// One entry per slice, oldest first, so the overlay can draw it without
+    /// knowing anything about timelines. Each slice takes the *strongest* rung
+    /// seen inside it — a two-second detection must not vanish because the slice
+    /// it fell in was mostly quiet.
+    fn overlay_timeline(&self) -> Vec<Option<overlay::Rung>> {
+        let cfg = self.app.config();
+        if !cfg.overlay_spectrogram {
+            return Vec::new();
+        }
+        self.timeline_slices(cfg.overlay_spectrogram_seconds, 480)
+    }
+
+    /// The lamp history resampled onto a time axis of `window_seconds`.
+    ///
+    /// Shared by the overlay strip and the main window's, so the two cannot
+    /// disagree about what happened — they are the same measurement drawn at two
+    /// widths, which is the point of putting it in both places.
+    ///
+    /// Each slice takes the *strongest* rung inside it. A two-second detection in
+    /// a mostly-quiet slice is exactly what the strip exists to show, and an
+    /// average or a last-value would erase it.
+    fn timeline_slices(&self, window_seconds: f32, slices: usize) -> Vec<Option<overlay::Rung>> {
+        if slices == 0 {
+            return Vec::new();
+        }
+        let Some(now) = self.snapshot.as_ref().map(|s| s.timeline_seconds) else {
+            return vec![None; slices];
+        };
+
+        let mut spans: Vec<(f64, f64, overlay::Rung)> = Vec::new();
+        for record in self.app.events().iter().rev().take(80) {
+            let e = &record.detection.event;
+            spans.push((
+                e.start_seconds,
+                e.start_seconds + e.duration_seconds as f64,
+                overlay::Rung::Anomaly,
+            ));
+        }
+        if let Some(engine) = self.app.engine() {
+            for stroke in engine.traced_strokes() {
+                spans.push((
+                    stroke.start_seconds,
+                    stroke.end_seconds,
+                    overlay::Rung::Signal,
+                ));
+            }
+        }
+        waterfall::project_spans(now, window_seconds.max(1.0) as f64, slices, &spans)
     }
 
     /// Rebuild the overlay's own spectrogram texture, at most as often as the
@@ -858,6 +1023,12 @@ impl CompassUi {
             w as usize,
             h as usize,
         );
+        // The timeline is painted into these pixels for the same reason as in
+        // the main window: one buffer, formed together.
+        let mut image = image;
+        let slices = self.timeline_slices(cfg.overlay_spectrogram_seconds, w as usize);
+        waterfall::paint_timeline(&mut image, &slices);
+
         // Handed over as pixels. The overlay viewport turns them into a texture
         // in its own pass; nothing here ever touches the GPU.
         self.pending_spectrogram = Some(image);
@@ -962,7 +1133,7 @@ impl CompassUi {
             }
         };
         let png = self.export_spectrogram();
-        self.export_status = Some(match (audio, png) {
+        let message = match (audio, png) {
             (Some(a), Some(_)) => format!(
                 "exported {:.0} s of audio and the spectrogram to {}",
                 seconds,
@@ -973,7 +1144,8 @@ impl CompassUi {
             (Some(a), None) => format!("kept the audio ({}), but the image failed", a.display()),
             (None, Some(p)) => format!("wrote {}, but the audio failed{why}", p.display()),
             (None, None) => format!("export failed{why} — see the log"),
-        });
+        };
+        self.export_status = Some((message, Instant::now()));
     }
 
     fn detectors(&mut self, ui: &mut egui::Ui) {
