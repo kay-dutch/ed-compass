@@ -920,6 +920,11 @@ impl AnalysisEngine {
     }
 
     /// Seconds of audio processed so far.
+    /// Seconds of audio processed, on the same clock the snapshot reports.
+    pub fn timeline_seconds(&self) -> f64 {
+        self.elapsed_seconds()
+    }
+
     fn elapsed_seconds(&self) -> f64 {
         self.format.frames_to_seconds(self.ring.total_frames())
     }

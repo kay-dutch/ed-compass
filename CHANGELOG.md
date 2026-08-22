@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.4.2 — pre-release
+
+* **SIGNAL is lit while the evidence is still on screen**, rather than for a
+  fixed time after the tool noticed it. The lamp and the timeline strip now
+  answer the same question, so they cannot disagree — when the last mark scrolls
+  off the left edge, the lamp goes out.
+
+  The fixed hold was wrong twice over. It was an invented number, and it
+  described *when the software noticed* rather than when anything happened, so
+  two detections moments apart produced two lit periods that pointed nowhere near
+  them. How long a signal stays visible is a real quantity; fifteen seconds was
+  not. `signal_hold_seconds` is gone.
+
 ## v0.4.1 — pre-release
 
 * **Captures you took by hand are no longer deleted.** When the disk filled, the

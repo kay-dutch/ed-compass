@@ -48,9 +48,10 @@ impl IgnoreBand {
 ///    "something happened" signal without disturbing anything. A value of
 ///    `true` in an existing file came from the old default rather than from
 ///    anyone choosing it.
-/// 9: the SIGNAL hold down to fifteen seconds. Thirty read as a lamp that was
-///    stuck rather than one reporting, now that the timeline strip carries the
-///    longer history.
+/// 9: the SIGNAL lamp no longer holds for a fixed time. It follows the timeline
+///    strip instead — lit while a detection is still on screen — so the lamp and
+///    the strip cannot disagree, and the duration is something real rather than
+///    a number someone chose.
 pub const OVERLAY_LAYOUT_REVISION: u32 = 9;
 
 /// Whether files can actually be created in a directory.
@@ -322,19 +323,6 @@ pub struct Config {
     /// and nothing is reported at all.
     #[serde(default = "default_novelty_sigmas")]
     pub novelty_sigmas: f32,
-    /// How long the SIGNAL lamp stays lit after something triggers it.
-    ///
-    /// Without a hold the lamp reports the *instant*, and the instant is often
-    /// gone before anyone looks up from flying — a period match that dips below
-    /// its confidence gate for one update, or a stroke traced once and not
-    /// again, flashes and vanishes.
-    ///
-    /// Fifteen seconds: long enough to glance across the cockpit, short enough
-    /// that the lamp still describes roughly now. It was thirty, which in the
-    /// air felt like the lamp was stuck rather than reporting. The timeline strip
-    /// carries the longer history, so the lamp does not have to.
-    #[serde(default = "default_signal_hold")]
-    pub signal_hold_seconds: f32,
     /// Shortest followed stroke worth drawing, in seconds.
     ///
     /// Measured on captures where the Landscape Signal was visible, real strokes
@@ -395,10 +383,6 @@ fn default_trace_min_seconds() -> f32 {
 
 fn default_trace_min_sweep() -> f32 {
     1.15
-}
-
-fn default_signal_hold() -> f32 {
-    15.0
 }
 
 fn default_novelty_sigmas() -> f32 {
@@ -497,7 +481,6 @@ impl Default for Config {
 
             novelty_threshold_db: 8.0,
             novelty_sigmas: 2.0,
-            signal_hold_seconds: 15.0,
             trace_min_seconds: 2.0,
             trace_min_sweep: 1.15,
             background_time_constant_seconds: 60.0,
@@ -614,7 +597,6 @@ impl Config {
         // takes it too.
         self.direction_finding = d.direction_finding;
         self.overlay_zoom_on_detection = d.overlay_zoom_on_detection;
-        self.signal_hold_seconds = d.signal_hold_seconds;
         self.overlay_fit_between_plotters = d.overlay_fit_between_plotters;
         self.overlay_width = d.overlay_width;
         self.overlay_height = d.overlay_height;
@@ -945,7 +927,6 @@ mod tests {
         "overlay_fit_between_plotters",
         "direction_finding",
         "overlay_zoom_on_detection",
-        "signal_hold_seconds",
         "overlay_layout_revision",
     ];
 

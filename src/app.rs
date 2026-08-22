@@ -129,17 +129,6 @@ pub struct App {
     /// only indicator that reliably separates the real signal from ship
     /// ambience — structure and keying both overlap with it.
     landscape_present: bool,
-    /// When SIGNAL was last triggered, and how far along the traced strokes had
-    /// got at that point.
-    ///
-    /// The lamp latches from this rather than reporting whatever is true this
-    /// millisecond. A detection is an event — it happened — and a lamp that
-    /// un-lights the moment a confidence dips below its gate reports the gate
-    /// rather than the signal.
-    signal_since: Option<Instant>,
-    /// End time of the newest stroke already counted, so the same one does not
-    /// re-trigger on every scan.
-    last_stroke_end: f64,
 }
 
 impl App {
@@ -191,8 +180,6 @@ impl App {
             structure_present: false,
             keying_suspect: false,
             landscape_present: false,
-            signal_since: None,
-            last_stroke_end: f64::NEG_INFINITY,
         }
     }
 
@@ -320,40 +307,32 @@ impl App {
     /// the detail line says which.
     /// Is SIGNAL lit?
     ///
-    /// True while anything has triggered it within `signal_hold_seconds`. See
-    /// [`App::signal_since`] for why it latches rather than reporting the
-    /// instant.
+    /// Lit while the evidence is **still on screen**, which is the same rule the
+    /// timeline strip draws by — so the lamp and the strip cannot disagree about
+    /// whether there is something to look at.
+    ///
+    /// This replaced a fixed hold, and the hold was the wrong idea twice over. It
+    /// was an invented number, and it described *when the tool noticed* rather
+    /// than when anything happened, so the lamp and the strip told different
+    /// stories about the same detection. How long a signal stays visible is a
+    /// real quantity; fifteen seconds was not.
     pub fn signal_present(&self) -> bool {
-        self.signal_since.is_some_and(|at| {
-            at.elapsed() < Duration::from_secs_f32(self.cfg.signal_hold_seconds.max(0.0))
-        })
-    }
-
-    /// What is triggering SIGNAL right now, ignoring the hold.
-    fn signal_triggered(&mut self) -> bool {
-        let morse = self
-            .morse()
-            .is_some_and(|m| m.is_present(self.cfg.morse_threshold));
-
-        // A stroke the tracer followed counts as much as a period match. It is
-        // the strongest visual evidence the tool produces: seeded on confident
-        // ink and followed down to a level no single-threshold test can reach.
-        let newest = self
-            .engine
-            .as_ref()
-            .map(|e| {
-                e.traced_strokes()
-                    .iter()
-                    .map(|s| s.end_seconds)
-                    .fold(f64::NEG_INFINITY, f64::max)
-            })
-            .unwrap_or(f64::NEG_INFINITY);
-        let new_stroke = newest.is_finite() && newest > self.last_stroke_end;
-        if new_stroke {
-            self.last_stroke_end = newest;
+        if self.landscape_present
+            || self
+                .morse()
+                .is_some_and(|m| m.is_present(self.cfg.morse_threshold))
+        {
+            return true;
         }
-
-        self.landscape_present || morse || new_stroke
+        let Some(engine) = self.engine.as_ref() else {
+            return false;
+        };
+        let window = self.cfg.overlay_spectrogram_seconds.max(1.0) as f64;
+        let now = engine.timeline_seconds();
+        engine
+            .traced_strokes()
+            .iter()
+            .any(|s| now - s.end_seconds <= window)
     }
 
     /// The current period estimate, for display.
@@ -400,10 +379,6 @@ impl App {
         self.landscape_present = engine.periodicity().is_some_and(|p| {
             crate::analysis::periodicity::matches_landscape(&p, LANDSCAPE_TOLERANCE_SECONDS)
         });
-
-        if self.signal_triggered() {
-            self.signal_since = Some(Instant::now());
-        }
 
         // Keep the audio on the *rising edge*. The primary detectors used to
         // light up without recording anything, because only the novelty-event
