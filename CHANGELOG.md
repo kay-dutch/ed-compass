@@ -2,7 +2,7 @@
 
 ## v0.4.3 — alpha
 
-* Bugfix: **The overlay no longer disappears when you Alt-Tab away.** It 
+* Bugfix: **The overlay no longer disappears when you Alt-Tab away.**
 * Bugfix: SIGNAL and CYPHER no longer stay lit through ordinary flight.
 
 ## v0.4.2 — alpha
