@@ -624,21 +624,15 @@ impl App {
         self.disk_usage
     }
 
-    /// Bring both folders back inside their budgets right now.
-    pub fn clean_up_disk(&mut self) {
-        self.writer.enforce_budget();
-        let exports = self
-            .cfg
-            .export_dir
-            .clone()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| self.writer.dir().with_file_name("exports"));
-        crate::retention::enforce_simple_budget(
-            &exports,
-            "png",
-            self.cfg.export_budget_mb.saturating_mul(1_048_576),
-        );
+    /// Delete every recording on disk, keeping every record.
+    ///
+    /// The budgets are enforced automatically after each capture, so this is not
+    /// "apply them now" — that would have nothing to do. It is the blunt one:
+    /// reclaim the whole folder in a single step.
+    pub fn erase_recordings(&mut self) -> u64 {
+        let freed = crate::retention::erase_all(self.writer.dir());
         self.disk_usage(true);
+        freed
     }
 
     /// Drain everything capture has produced. Returns the number of new

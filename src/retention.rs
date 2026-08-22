@@ -152,6 +152,31 @@ pub fn enforce(dir: &Path, policy: &Policy) -> u64 {
     freed
 }
 
+/// Delete every recording, keeping every record.
+///
+/// The manual counterpart to [`enforce`], and deliberately not a smaller version
+/// of it: the budget runs on its own after every capture, so a button that
+/// merely applied the budget would find the work already done and appear broken.
+/// This one always has something to do.
+///
+/// Nothing is spared, including captures taken by hand — "erase all" that quietly
+/// kept some files would be the more surprising behaviour. The sidecars stay, as
+/// they do under every other path here, so the observations survive the audio.
+pub fn erase_all(dir: &Path) -> u64 {
+    let mut freed = 0;
+    for r in scan(dir) {
+        match std::fs::remove_file(&r.audio) {
+            Ok(()) => {
+                freed += r.bytes;
+                mark_evicted(&r.sidecar);
+            }
+            Err(e) => log::warn!("could not erase {}: {e}", r.audio.display()),
+        }
+    }
+    log::info!("erased every recording in {}", dir.display());
+    freed
+}
+
 /// Note in the sidecar that its audio is gone.
 ///
 /// Without this the record still names an `audio_file` that is not there, and
@@ -488,5 +513,42 @@ mod tests {
         assert!(left < 4, "at least one export should be gone");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn erase_all_takes_every_recording_and_keeps_every_record() {
+        let dir = std::env::temp_dir().join(format!(
+            "ed-compass-erase-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, reason) in [("auto", "landscape"), ("kept", "manual")] {
+            std::fs::write(dir.join(format!("{name}.flac")), vec![0u8; 2048]).unwrap();
+            std::fs::write(
+                dir.join(format!("{name}.json")),
+                format!("{{\"reason\": \"{reason}\"}}"),
+            )
+            .unwrap();
+        }
+
+        let freed = erase_all(dir.as_path());
+
+        assert_eq!(freed, 4096, "it reports everything it reclaimed");
+        assert!(
+            !dir.join("auto.flac").exists() && !dir.join("kept.flac").exists(),
+            "nothing is spared, including a capture taken by hand: \"erase all\" \
+             that quietly kept some files would be the greater surprise"
+        );
+        for name in ["auto", "kept"] {
+            let text = std::fs::read_to_string(dir.join(format!("{name}.json")))
+                .expect("the record outlives its audio");
+            assert!(
+                text.contains("audio_evicted"),
+                "and it says so, so a reader can tell a deleted file from a moved one"
+            );
+        }
+        assert_eq!(audio_bytes(dir.as_path()), 0);
     }
 }

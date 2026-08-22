@@ -145,16 +145,24 @@ pub fn disk_usage(ui: &mut egui::Ui, app: &mut App) {
         )
         .on_hover_text(
             "Every detection keeps its record — system, coordinates, scores, \
-             period — forever. Only the audio is ever reclaimed, weakest first.",
+             period — forever. Only the audio is ever reclaimed, oldest first.",
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .small_button("clean up")
-                .on_hover_text("Apply the budgets now instead of waiting for the next capture.")
-                .clicked()
-            {
-                app.clean_up_disk();
-            }
+            // Behind a menu, not on the button itself: this erases every
+            // recording including the ones kept by hand, it cannot be undone,
+            // and it sits a few pixels from the controls used in flight.
+            ui.menu_button("erase all", |ui| {
+                if ui.button("erase every recording").clicked() {
+                    app.erase_recordings();
+                    ui.close();
+                }
+            })
+            .response
+            .on_hover_text(
+                "Delete every recording on disk. The observations are kept — \
+                 only the audio goes. The budgets run on their own after each \
+                 capture, so this is the only clean-up worth pressing.",
+            );
         });
     });
 }
