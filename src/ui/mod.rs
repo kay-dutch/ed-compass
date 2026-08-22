@@ -159,7 +159,15 @@ fn run_with(slot: std::rc::Rc<std::cell::RefCell<Option<App>>>, backend: Backend
             .name("repaint-heartbeat".into())
             .spawn(move || {
                 loop {
-                    std::thread::sleep(Duration::from_millis(33));
+                    // Slow on purpose. This is a floor, not a cadence: the
+                    // interface schedules its own repaints and this only has to
+                    // ensure frames never stop entirely. Running it at the frame
+                    // rate put a second clock beside the first, and two
+                    // unsynchronised timers at the same nominal rate deliver
+                    // frames in bursts and gaps — which the overlay showed as
+                    // judder while the main window, whose picture advances less
+                    // than a pixel per update, rode it out.
+                    std::thread::sleep(Duration::from_millis(250));
                     ctx.request_repaint();
                 }
             })

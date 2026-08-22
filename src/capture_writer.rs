@@ -153,7 +153,6 @@ pub struct CaptureWriter {
     cooldown: Duration,
     max_per_hour: u32,
     budget_bytes: u64,
-    protect_best: usize,
     /// "flac" or "wav".
     format_name: String,
     /// When each recent capture happened, oldest first.
@@ -169,7 +168,6 @@ impl CaptureWriter {
             cooldown: Duration::from_secs_f32(cfg.capture_cooldown_seconds.max(0.0)),
             max_per_hour: cfg.max_captures_per_hour,
             budget_bytes: cfg.disk_budget_mb.saturating_mul(1_048_576),
-            protect_best: cfg.protect_best_captures,
             format_name: cfg.capture_format.clone(),
             recent: std::collections::VecDeque::new(),
             captures_written: 0,
@@ -360,7 +358,6 @@ impl CaptureWriter {
             &self.dir,
             &crate::retention::Policy {
                 budget_bytes: self.budget_bytes,
-                protect_best: self.protect_best,
             },
         );
     }
@@ -667,14 +664,16 @@ mod tests {
         let dir = temp_dir("budget");
         std::fs::create_dir_all(&dir).unwrap();
 
-        // Three 4 KB captures against a budget that fits one. Their scores are
-        // deliberately *inverted* against their ages: the oldest is the best.
+        // Three 4 KB captures against a budget that fits one. Scores vary and are
+        // deliberately ignored: the policy goes by age, because a detector score
+        // says how well the software understood a recording, and the search is
+        // for signals it cannot recognise at all.
         for (i, score) in [(0, 0.95), (1, 0.40), (2, 0.10)] {
             let wav = dir.join(format!("cap{i}.wav"));
             std::fs::write(&wav, vec![0u8; 4096]).unwrap();
             std::fs::write(
                 wav.with_extension("json"),
-                format!("{{\"score\": {score}, \"star_system\": \"Orrere\"}}"),
+                format!("{{\"score\": {score}, \"star_system\": \"unknown\"}}"),
             )
             .unwrap();
             // Distinct mtimes so the ordering is unambiguous.
@@ -683,17 +682,16 @@ mod tests {
 
         let mut cfg = Config::default();
         cfg.disk_budget_mb = 0; // set the raw byte budget below instead
-        cfg.protect_best_captures = 0;
         let mut w = CaptureWriter::new(&dir, &cfg);
         w.budget_bytes = 5000;
         w.enforce_budget();
 
         assert!(
-            dir.join("cap0.wav").exists(),
-            "the strongest capture must survive even though it is the oldest"
+            dir.join("cap2.wav").exists(),
+            "the newest survives, whatever the detectors made of it"
         );
-        assert!(!dir.join("cap2.wav").exists(), "the weakest goes first");
-        assert!(!dir.join("cap1.wav").exists(), "then the next weakest");
+        assert!(!dir.join("cap0.wav").exists(), "the oldest goes first");
+        assert!(!dir.join("cap1.wav").exists(), "then the next oldest");
 
         // Every record survives its recording, and says so.
         for i in 0..3 {
@@ -701,12 +699,12 @@ mod tests {
             assert!(json.exists(), "sidecar {i} must never be deleted");
             let v: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
-            assert_eq!(v["star_system"], "Orrere");
+            assert_eq!(v["star_system"], "unknown");
             assert_eq!(
                 v.get("audio_evicted")
                     .and_then(|b| b.as_bool())
                     .unwrap_or(false),
-                i != 0,
+                i != 2,
                 "sidecar {i} should be marked evicted only if its audio went"
             );
         }

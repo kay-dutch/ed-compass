@@ -34,7 +34,7 @@ flying you'd normally use the cockpit overlay instead.</sub>
 ## Install
 
 **[⬇ Download the latest release](../../releases)** — run
-`ED-Compass-Setup-0.4.3.exe` and you're done. No administrator rights, nothing else to
+`ED-Compass-Setup-x.x.x.exe` and you're done. No administrator rights, nothing else to
 install.
 
 Windows will say *"unknown publisher"*. Click **More info → Run anyway**. That
@@ -137,11 +137,11 @@ observations accumulate into something you can triangulate from.
 ## Questions
 
 **Will it fill my disk?** No. Recordings are FLAC and capped (about 2 GB by
-default, roughly 350 captures). When it's full the weakest automatic detections
-are cleaned up first, and **anything you kept yourself with Export is never
-touched**. The written record of every observation survives regardless, even
-after its audio is gone. There's a usage bar and a **clean up** button in the
-control panel.
+default, roughly 350 captures). When it's full the **oldest** automatic
+recordings are cleaned up first, and **anything you kept yourself with Export is
+never touched**. The written record of every observation survives regardless,
+even after its audio is gone. There's a usage bar and a **clean up** button in
+the control panel.
 
 **Do I need 7.1 surround?** No. Direction finding is an optional extra that needs
 it; detection works fine in stereo, which is what almost everyone should use.

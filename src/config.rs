@@ -357,10 +357,6 @@ pub struct Config {
     pub capture_cooldown_seconds: f32,
     pub max_captures_per_hour: u32,
     pub disk_budget_mb: u64,
-    /// How many of the best captures are held back from eviction, whatever
-    /// their age. Ranked by detector score, with a confirmed Landscape Signal
-    /// outranking everything else.
-    pub protect_best_captures: usize,
     /// Budget for exported spectrogram PNGs, which are renderings of data held
     /// elsewhere and so are trimmed oldest-first with no ranking.
     pub export_budget_mb: u64,
@@ -495,7 +491,6 @@ impl Default for Config {
             capture_cooldown_seconds: 60.0,
             max_captures_per_hour: 10,
             disk_budget_mb: 2048,
-            protect_best_captures: 20,
             export_budget_mb: 512,
             capture_format: "flac".into(),
 
@@ -979,7 +974,6 @@ mod tests {
         "capture_cooldown_seconds",
         "max_captures_per_hour",
         "disk_budget_mb",
-        "protect_best_captures",
         "export_budget_mb",
         "capture_format",
         "detect_morse",

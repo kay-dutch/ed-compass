@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.4 — alpha
+
+* Recordings are cleaned up oldest first. 
+* Bugfix: the overlay animation is smooth again. 0.4.3 made it judder.
+
 ## v0.4.3 — alpha
 
 * Bugfix: **The overlay no longer disappears when you Alt-Tab away.**

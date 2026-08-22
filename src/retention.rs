@@ -1,9 +1,22 @@
 //! What to keep when the disk budget is reached.
 //!
-//! The naive policy — delete the oldest — is wrong for this tool. A capture is
-//! evidence, and evidence does not lose value by ageing: the strongest thing
-//! ever recorded would be deleted before a weak detection from yesterday. So
-//! captures are ranked, and the best are protected.
+//! **Oldest first, with one exception.** Captures used to be ranked by what the
+//! detectors made of them, keeping the best-scoring and evicting the rest. That
+//! is the right policy for a tool that recognises what it is looking at, and the
+//! wrong one for this tool, because ranking by detector score means ranking by
+//! *how much the software understands a recording* — and the entire purpose here
+//! is finding signals nobody has catalogued, which is precisely what the
+//! detectors cannot recognise. A recording they rate at zero is what an
+//! undiscovered signal looks like to them. The policy was quietly deleting the
+//! most interesting thing on the disk first.
+//!
+//! Age is a poorer measure of value but an honest one: it makes no claim about
+//! the contents. What survives is what you recorded most recently, which is at
+//! least the material you are still working on.
+//!
+//! The exception is a capture taken by hand. Someone pressing Export has made a
+//! judgement the software is not in a position to overrule, and those are kept
+//! until nothing else remains.
 //!
 //! The second rule matters more than the first. A capture is two files: the
 //! audio, and a JSON sidecar carrying the system, the coordinates, the scores
@@ -24,34 +37,24 @@ pub struct Record {
     pub sidecar: PathBuf,
     pub bytes: u64,
     pub modified: SystemTime,
-    /// How much this capture is worth keeping. See [`value_of`].
-    pub value: f32,
+    /// Taken by hand rather than by a detector. Kept while anything else remains.
+    pub manual: bool,
 }
 
-/// Value given to a capture taken by hand.
-///
-/// Above anything a detector can produce — the maximum from a scored capture is
-/// two, one for the score and one for a Landscape match — so a deliberate
-/// capture is never evicted while any automatic one remains.
-const MANUAL_VALUE: f32 = 1000.0;
-
-/// How much to keep, and how much of it to protect.
+/// How much to keep.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Policy {
     pub budget_bytes: u64,
-    /// The best this many captures are kept even as everything else is evicted.
-    pub protect_best: usize,
 }
 
 /// Indices of the records whose audio should be deleted, in the order to do it.
 ///
 /// Pure: it touches no files, so the decision can be tested without a disk.
 ///
-/// Lowest value goes first, oldest first among equals. The best `protect_best`
-/// are held back — but only until nothing else is left. A budget that could be
-/// overrun by protected files is not a budget, so once the unprotected records
-/// are exhausted the policy continues into the protected ones, still worst
-/// first. Anything else lets an unattended overnight session fill the drive.
+/// Oldest first. Captures taken by hand go last of all — but they do go, once
+/// nothing else is left, because a budget that protected files without limit
+/// would not be a budget and an unattended overnight session would fill the
+/// drive.
 pub fn evictions(records: &[Record], policy: &Policy) -> Vec<usize> {
     if policy.budget_bytes == 0 {
         return Vec::new();
@@ -61,24 +64,11 @@ pub fn evictions(records: &[Record], policy: &Policy) -> Vec<usize> {
         return Vec::new();
     }
 
-    // Rank by value to decide what is protected, best first.
-    let mut by_value: Vec<usize> = (0..records.len()).collect();
-    by_value.sort_by(|&a, &b| {
-        records[b]
-            .value
-            .total_cmp(&records[a].value)
-            .then_with(|| records[b].modified.cmp(&records[a].modified))
-    });
-    let protected: std::collections::HashSet<usize> =
-        by_value.iter().take(policy.protect_best).copied().collect();
-
-    // Worst first, oldest first among equals; protected ones last of all.
     let mut order: Vec<usize> = (0..records.len()).collect();
     order.sort_by(|&a, &b| {
-        protected
-            .contains(&a)
-            .cmp(&protected.contains(&b))
-            .then_with(|| records[a].value.total_cmp(&records[b].value))
+        records[a]
+            .manual
+            .cmp(&records[b].manual)
             .then_with(|| records[a].modified.cmp(&records[b].modified))
     });
 
@@ -93,45 +83,13 @@ pub fn evictions(records: &[Record], policy: &Policy) -> Vec<usize> {
     doomed
 }
 
-/// How much a capture is worth keeping, read from its sidecar.
+/// Was this capture taken by hand?
 ///
-/// The two sidecar shapes carry different fields, so this reads whichever are
-/// present rather than insisting on one schema. A confirmed Landscape Signal
-/// gets a full point on top, which puts it above anything scored on confidence
-/// alone — a period match is the one measurement here that has been checked
-/// against a known recording, so it is the one worth protecting hardest.
-///
-/// **A capture someone took by hand outranks all of it.** Ranking by detector
-/// score alone had the effect exactly backwards: a manual capture scores what the
-/// detectors made of it, which for a signal they cannot see is 0.000, so the
-/// files a person deliberately chose to keep sorted to the bottom and were
-/// deleted first. That is not a hypothetical — it evicted the only recording this
-/// project had of a real signal, taken while a commander was looking straight at
-/// it, because the software disagreed with them. When a human and a detector
-/// disagree about what is worth keeping, the human is the one who has been right
-/// so far.
-pub fn value_of(json: &serde_json::Value) -> f32 {
-    if json.get("reason").and_then(|v| v.as_str()) == Some("manual") {
-        return MANUAL_VALUE;
-    }
-
-    let num = |key: &str| json.get(key).and_then(|v| v.as_f64()).map(|v| v as f32);
-
-    let best = [
-        num("score"),
-        num("structure_score"),
-        num("keying_confidence"),
-    ]
-    .into_iter()
-    .flatten()
-    .fold(0.0f32, f32::max);
-
-    let landscape = json
-        .get("matches_landscape")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    best + if landscape { 1.0 } else { 0.0 }
+/// The only distinction the policy makes. Everything else is decided by age,
+/// deliberately: see the module header for why detector scores are the wrong
+/// measure of what is worth keeping here.
+pub fn is_manual(json: &serde_json::Value) -> bool {
+    json.get("reason").and_then(|v| v.as_str()) == Some("manual")
 }
 
 /// Read the stored captures in a directory.
@@ -154,16 +112,16 @@ pub fn scan(dir: &Path) -> Vec<Record> {
         }
         let Ok(meta) = entry.metadata() else { continue };
         let sidecar = audio.with_extension("json");
-        let value = std::fs::read_to_string(&sidecar)
+        let manual = std::fs::read_to_string(&sidecar)
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-            .map_or(0.0, |j| value_of(&j));
+            .is_some_and(|j| is_manual(&j));
         records.push(Record {
             audio,
             sidecar,
             bytes: meta.len(),
             modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-            value,
+            manual,
         });
     }
     records
@@ -184,9 +142,8 @@ pub fn enforce(dir: &Path, policy: &Policy) -> u64 {
                 freed += r.bytes;
                 mark_evicted(&r.sidecar);
                 log::info!(
-                    "evicted the audio of {} (value {:.2}); its record is kept",
-                    r.audio.display(),
-                    r.value
+                    "evicted the audio of {}; its record is kept",
+                    r.audio.display()
                 );
             }
             Err(e) => log::warn!("could not evict {}: {e}", r.audio.display()),
@@ -300,46 +257,17 @@ pub fn enforce_simple_budget(dir: &Path, extension: &str, budget_bytes: u64) -> 
 
 #[cfg(test)]
 mod tests {
-
-    /// The eviction that cost this project its only real recording of a signal.
-    ///
-    /// A capture taken by hand records what the *detectors* made of the audio,
-    /// which for a signal they cannot see is zero. Ranked on that alone it sorts
-    /// below every automatic capture of ship noise, and the disk budget deletes
-    /// it first — which is what happened, to a recording made while a commander
-    /// was looking straight at the signal.
-    #[test]
-    fn a_hand_taken_capture_outranks_every_automatic_one() {
-        let manual: serde_json::Value = serde_json::json!({
-            "reason": "manual",
-            "structure_score": 0.0,
-            "keying_confidence": null,
-            "matches_landscape": false,
-        });
-        let confident: serde_json::Value = serde_json::json!({
-            "reason": "structure",
-            "score": 1.0,
-            "structure_score": 1.0,
-            "keying_confidence": 1.0,
-            "matches_landscape": true,
-        });
-        assert!(
-            value_of(&manual) > value_of(&confident),
-            "a deliberate capture ({}) must outrank the best automatic one ({})",
-            value_of(&manual),
-            value_of(&confident)
-        );
-    }
     use super::*;
     use std::time::Duration;
 
-    fn record(name: &str, bytes: u64, age_secs: u64, value: f32) -> Record {
+    /// A capture `age_secs` old, optionally one taken by hand.
+    fn record(name: &str, bytes: u64, age_secs: u64, manual: bool) -> Record {
         Record {
             audio: PathBuf::from(format!("{name}.flac")),
             sidecar: PathBuf::from(format!("{name}.json")),
             bytes,
             modified: SystemTime::UNIX_EPOCH + Duration::from_secs(10_000 - age_secs),
-            value,
+            manual,
         }
     }
 
@@ -359,109 +287,70 @@ mod tests {
 
     #[test]
     fn nothing_is_evicted_while_the_budget_holds() {
-        let records = vec![record("a", 100, 10, 0.5), record("b", 100, 5, 0.9)];
-        let policy = Policy {
-            budget_bytes: 1000,
-            protect_best: 0,
-        };
+        let records = vec![record("a", 100, 10, false), record("b", 100, 5, false)];
+        let policy = Policy { budget_bytes: 1000 };
         assert!(evictions(&records, &policy).is_empty());
     }
 
     #[test]
-    fn the_weakest_capture_goes_first_not_the_oldest() {
-        // This is the whole point. "c" is the newest and the weakest; "a" is the
-        // oldest and the strongest. Oldest-first would delete the best evidence.
+    fn captures_of_the_same_age_are_evicted_in_a_stable_order() {
         let records = vec![
-            record("a", 100, 100, 0.95),
-            record("b", 100, 50, 0.60),
-            record("c", 100, 1, 0.10),
+            record("old", 100, 100, false),
+            record("new", 100, 1, false),
+            record("keep", 100, 50, false),
         ];
-        let policy = Policy {
-            budget_bytes: 250,
-            protect_best: 0,
-        };
-        assert_eq!(names(&records, evictions(&records, &policy)), ["c"]);
-
-        let policy = Policy {
-            budget_bytes: 150,
-            protect_best: 0,
-        };
-        assert_eq!(names(&records, evictions(&records, &policy)), ["c", "b"]);
-    }
-
-    #[test]
-    fn equally_valued_captures_are_evicted_oldest_first() {
-        let records = vec![
-            record("old", 100, 100, 0.5),
-            record("new", 100, 1, 0.5),
-            record("keep", 100, 50, 0.9),
-        ];
-        let policy = Policy {
-            budget_bytes: 250,
-            protect_best: 0,
-        };
+        let policy = Policy { budget_bytes: 250 };
         assert_eq!(names(&records, evictions(&records, &policy)), ["old"]);
     }
 
+    /// The policy, stated as a test: age decides, nothing else.
+    ///
+    /// It used to be detector score, and that was backwards for this tool —
+    /// ranking by score ranks by how much the software understands a recording,
+    /// while the whole search is for signals it cannot recognise. The
+    /// lowest-scoring file on the disk is what an undiscovered signal looks like.
     #[test]
-    fn the_best_captures_are_protected_while_anything_else_remains() {
+    fn the_oldest_capture_goes_first() {
         let records = vec![
-            record("best", 100, 100, 0.99),
-            record("good", 100, 90, 0.80),
-            record("weak1", 100, 10, 0.10),
-            record("weak2", 100, 5, 0.10),
+            record("newest", 100, 1, false),
+            record("oldest", 100, 900, false),
+            record("middle", 100, 100, false),
         ];
-        // Room for two, protecting the best two: the weak pair goes.
-        let policy = Policy {
-            budget_bytes: 200,
-            protect_best: 2,
-        };
-        let out = names(&records, evictions(&records, &policy));
-        assert_eq!(out, ["weak1", "weak2"]);
+        let policy = Policy { budget_bytes: 250 };
+        assert_eq!(names(&records, evictions(&records, &policy)), ["oldest"]);
     }
 
+    /// A capture someone took by hand is a judgement the software is not in a
+    /// position to overrule, so it outlives every automatic one however old.
     #[test]
-    fn protection_yields_rather_than_letting_the_budget_be_exceeded() {
-        // Everything is protected, yet only one fits. A protected set that can
-        // overrun the disk is not a budget at all, so the policy eats into it —
-        // still worst first.
+    fn a_hand_taken_capture_is_kept_while_anything_else_remains() {
         let records = vec![
-            record("best", 100, 100, 0.99),
-            record("mid", 100, 50, 0.70),
-            record("low", 100, 10, 0.40),
+            record("kept-by-hand", 100, 5000, true),
+            record("auto-new", 100, 1, false),
+            record("auto-old", 100, 50, false),
         ];
-        let policy = Policy {
-            budget_bytes: 100,
-            protect_best: 99,
-        };
+        let policy = Policy { budget_bytes: 150 };
         assert_eq!(
             names(&records, evictions(&records, &policy)),
-            ["low", "mid"]
+            ["auto-old", "auto-new"],
+            "the oldest automatic goes first, and the hand-taken one is untouched"
         );
     }
 
+    /// But protection has to yield eventually, or an unattended session fills
+    /// the drive and a budget is not a budget.
     #[test]
-    fn a_landscape_match_outranks_any_confidence_score() {
-        let plain = serde_json::json!({ "score": 0.99, "matches_landscape": false });
-        let matched = serde_json::json!({ "score": 0.20, "matches_landscape": true });
-        assert!(
-            value_of(&matched) > value_of(&plain),
-            "a checked period match is worth more than an unverified high score"
+    fn hand_taken_captures_yield_rather_than_overrunning_the_budget() {
+        let records = vec![
+            record("hand-old", 100, 900, true),
+            record("hand-new", 100, 10, true),
+        ];
+        let policy = Policy { budget_bytes: 150 };
+        assert_eq!(
+            names(&records, evictions(&records, &policy)),
+            ["hand-old"],
+            "oldest first even among hand-taken captures"
         );
-    }
-
-    #[test]
-    fn value_reads_whichever_sidecar_shape_it_is_given() {
-        // The novelty sidecar carries `score`.
-        assert!((value_of(&serde_json::json!({ "score": 0.7 })) - 0.7).abs() < 1e-6);
-        // The detector sidecar carries these instead, and the strongest wins.
-        let detector = serde_json::json!({
-            "structure_score": 0.4,
-            "keying_confidence": 0.8,
-        });
-        assert!((value_of(&detector) - 0.8).abs() < 1e-6);
-        // An unrecognisable sidecar is worth nothing, so it is evicted first.
-        assert_eq!(value_of(&serde_json::json!({ "unrelated": 1 })), 0.0);
     }
 
     #[test]
@@ -484,13 +373,7 @@ mod tests {
             .unwrap();
         }
 
-        let freed = enforce(
-            &dir,
-            &Policy {
-                budget_bytes: 4096,
-                protect_best: 0,
-            },
-        );
+        let freed = enforce(&dir, &Policy { budget_bytes: 4096 });
         assert_eq!(freed, 4096);
 
         assert!(
