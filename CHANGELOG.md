@@ -1,16 +1,16 @@
 # Changelog
 
-## v0.4.3 — pre-release
+## v0.4.3 — alpha
 
 * Bugfix: **The overlay no longer disappears when you Alt-Tab away.** It 
 * Bugfix: SIGNAL and CYPHER no longer stay lit through ordinary flight.
 
-## v0.4.2 — pre-release
+## v0.4.2 — alpha
 
 * SIGNAL stays lit while a detection is still on screen, so the lamp and the
   timeline strip always agree.
 
-## v0.4.1 — pre-release
+## v0.4.1 — alpha
 
 * **Captures you kept by hand are never deleted to make room.** Worth updating
   for.
@@ -20,7 +20,7 @@
 * Detection is more sensitive, and sensitivity is now adjustable.
 * New icon. The overlay zoom is off by default.
 
-## v0.4.0 — pre-release
+## v0.4.0 — alpha
 
 * Detection stays inside the frequency band you configure.
 * Only sound output is ever listened to — never a microphone.
@@ -35,13 +35,13 @@
   reading is the one to trust.
 * Various fixes.
 
-## v0.3.0 — pre-release
+## v0.3.0 — alpha
 
 * Detects Thargoid Sensor Morse, and keyed transmissions generally, reported
   through the SIGNAL lamp.
 * Drawn-structure detection is much less prone to firing on ordinary ship noise.
 * Fixed a phantom symbol rate in the keying readout.
 
-## v0.2.0 — pre-release
+## v0.2.0 — alpha
 
-* Second pre-release
+* Second alpha

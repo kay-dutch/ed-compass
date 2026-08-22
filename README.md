@@ -1,13 +1,13 @@
 # ED Compass
 
-![Status](https://img.shields.io/badge/STATUS-ALFA--RELEASE%20WORK%20IN%20PROGRESS-critical?style=for-the-badge)
+![Status](https://img.shields.io/badge/STATUS-ALPHA--RELEASE%20WORK%20IN%20PROGRESS-critical?style=for-the-badge)
 
 > [!IMPORTANT]
-> ## ⚠️ ALFA-RELEASE — WORK IN PROGRESS
+> ## ⚠️ ALPHA-RELEASE — WORK IN PROGRESS
 >
 > Detector thresholds, file formats and the interface are all still changing, so
 > anything ED Compass reports should be treated as provisional rather than
-> dependable. Releases are published as pre-releases for the same reason.
+> dependable. Releases are published as alphas for the same reason.
 > Try it, and please do report what you find — but don't build a discovery claim
 > on it yet.
 
@@ -116,7 +116,7 @@ detected the same way.
 Flying with it is harder than analysing a clean recording. Pointed at a real
 signal in the black it will draw around what it finds and light SIGNAL, but it
 will not always name what it has found, and its drawn-structure detection is not
-yet dependable. This is why it is a pre-release.
+yet dependable. This is why it is an alpha.
 
 It costs a fraction of one CPU core and about 40 MB, so you can leave it
 running.
