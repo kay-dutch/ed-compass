@@ -58,6 +58,16 @@ pub struct CaptureHandle {
 }
 
 impl CaptureHandle {
+    /// A handle with nothing behind it, for when there is no device to capture
+    /// from yet. Lets the application start and show why rather than refusing to
+    /// open at all.
+    pub fn idle() -> Self {
+        Self {
+            stop: Arc::new(AtomicBool::new(true)),
+            thread: None,
+        }
+    }
+
     pub fn is_running(&self) -> bool {
         !self.stop.load(Ordering::Relaxed)
     }

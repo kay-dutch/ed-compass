@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossbeam_channel::{Receiver, TryRecvError};
+use crossbeam_channel::{Receiver, Sender, TryRecvError};
 
 use crate::audio::StreamFormat;
 use crate::audio::capture::{CaptureHandle, CaptureMessage};
@@ -94,8 +94,16 @@ pub struct App {
     cfg: Config,
     device_label: String,
     rx: Receiver<CaptureMessage>,
+    /// Kept so capture can be started again on a device that appears later.
+    tx: Sender<CaptureMessage>,
     /// Held so capture stops when the app is dropped.
     _capture: CaptureHandle,
+    /// Watch for an output device and attach to it when one appears.
+    ///
+    /// Live capture only. A file or synthetic source has no device to lose, and
+    /// probing on their behalf would attach a real one underneath them.
+    reconnect: bool,
+    last_device_probe: Option<Instant>,
 
     engine: Option<AnalysisEngine>,
     journal: Option<JournalWatcher>,
@@ -142,6 +150,7 @@ impl App {
         cfg: Config,
         device_label: String,
         capture: CaptureHandle,
+        tx: Sender<CaptureMessage>,
         rx: Receiver<CaptureMessage>,
         capture_dir: PathBuf,
     ) -> Self {
@@ -171,6 +180,9 @@ impl App {
             device_label,
             rx,
             _capture: capture,
+            tx,
+            reconnect: false,
+            last_device_probe: None,
             engine: None,
             journal,
             pending: Vec::new(),
@@ -635,6 +647,79 @@ impl App {
         freed
     }
 
+    /// Start with no device, waiting for one to appear.
+    ///
+    /// A window that opens and explains itself beats a console message nobody
+    /// sees: the usual way to hit this is launching before the headphones are
+    /// plugged in, and the fix is to plug them in — which this notices, so the
+    /// application never has to be restarted for it.
+    pub fn waiting_for_device(
+        cfg: Config,
+        tx: Sender<CaptureMessage>,
+        rx: Receiver<CaptureMessage>,
+        capture_dir: PathBuf,
+        why: String,
+    ) -> Self {
+        let mut app = Self::new(
+            cfg,
+            "no output device".into(),
+            CaptureHandle::idle(),
+            tx,
+            rx,
+            capture_dir,
+        );
+        app.reconnect = true;
+        app.status = Status::DeviceLost;
+        app.error = Some(why);
+        app
+    }
+
+    /// Watch for a device if this one is ever lost. Live capture only.
+    pub fn reconnect_on_device_loss(&mut self) {
+        self.reconnect = true;
+    }
+
+    /// Attach to an output device if one has appeared.
+    ///
+    /// Covers both ways of having no audio — none present at startup, and one
+    /// unplugged mid-session — because to everything downstream they are the
+    /// same state, and both are fixed by the same act of plugging something in.
+    fn probe_for_device(&mut self) {
+        /// Cheap, but not free: enumeration crosses into the audio subsystem.
+        const PROBE: Duration = Duration::from_secs(2);
+
+        if !self.reconnect || self.status != Status::DeviceLost {
+            return;
+        }
+        if self.last_device_probe.is_some_and(|t| t.elapsed() < PROBE) {
+            return;
+        }
+        self.last_device_probe = Some(Instant::now());
+
+        let Ok(devices) = crate::audio::device::enumerate() else {
+            return;
+        };
+        let Some(device) = crate::audio::device::select(&devices, &self.cfg.device) else {
+            return;
+        };
+        match crate::audio::capture::start(device, self.tx.clone()) {
+            Ok(handle) => {
+                log::info!("attached to {}", device.display_name());
+                self.device_label = device.display_name();
+                self._capture = handle;
+                self.error = None;
+                self.status = Status::Starting;
+                // The new stream negotiates its own format, and the engine is
+                // built from that; a `Format` message follows and rebuilds it.
+                self.engine = None;
+                self.last_format = None;
+            }
+            // Logged once per probe rather than surfaced: the device is there
+            // but not yet usable, which resolves itself in a second or two.
+            Err(e) => log::debug!("device present but not ready: {e}"),
+        }
+    }
+
     /// Drain everything capture has produced. Returns the number of new
     /// detections.
     pub fn pump(&mut self) -> usize {
@@ -716,6 +801,7 @@ impl App {
         self.flush_pending();
         self.check_detectors();
         self.update_status();
+        self.probe_for_device();
         new_detections
     }
 
@@ -932,12 +1018,53 @@ mod tests {
         c
     }
 
+    #[test]
+    fn starts_without_a_device_and_says_why() {
+        let dir = std::env::temp_dir().join(format!("ed-compass-nodev-{}", std::process::id()));
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut app = App::waiting_for_device(
+            config(),
+            tx,
+            rx,
+            dir,
+            "no audio output device — plug in headphones or speakers".into(),
+        );
+
+        // The point of the exercise: it exists, rather than having refused to
+        // start, and it carries the reason where the window can show it.
+        assert_eq!(app.status(), Status::DeviceLost);
+        assert!(
+            app.error().is_some_and(|e| e.contains("no audio output")),
+            "the reason reaches the interface"
+        );
+
+        // And it keeps running. Pumping with nothing attached must not panic or
+        // wedge; this is the state it sits in until something is plugged in.
+        for _ in 0..3 {
+            assert_eq!(app.pump(), 0);
+        }
+        assert_eq!(app.status(), Status::DeviceLost);
+    }
+
+    #[test]
+    fn a_file_source_never_reaches_for_a_device() {
+        // Probing exists for live capture. A file or synthetic source has no
+        // device to lose, and attaching one underneath it would replace the very
+        // thing being analysed.
+        let dir = std::env::temp_dir().join(format!("ed-compass-nodev2-{}", std::process::id()));
+        let app = app_with(TestSignal::Silence, dir);
+        assert!(
+            !app.reconnect,
+            "synthetic and file sources do not reconnect"
+        );
+    }
+
     fn app_with(signal: TestSignal, dir: PathBuf) -> App {
         let cfg = config();
         let format = StreamFormat::new(8_000, 8, MASK_7_1, SampleFormat::F32);
         let (tx, rx) = crossbeam_channel::unbounded();
-        let capture = start_synthetic(SyntheticSource::new(signal, format, -45.0), tx);
-        App::new(cfg, "synthetic".into(), capture, rx, dir)
+        let capture = start_synthetic(SyntheticSource::new(signal, format, -45.0), tx.clone());
+        App::new(cfg, "synthetic".into(), capture, tx, rx, dir)
     }
 
     /// Pump until a condition holds or the deadline passes.
@@ -1012,7 +1139,7 @@ mod tests {
             SyntheticSource::new(TestSignal::Silence, format, 0.0),
             tx.clone(),
         );
-        let mut app = App::new(cfg, "dev".into(), capture, rx, dir.clone());
+        let mut app = App::new(cfg, "dev".into(), capture, tx.clone(), rx, dir.clone());
 
         // Let the stream establish itself first. Sending the error immediately
         // raced the capture thread's own `Format` message, and a format means

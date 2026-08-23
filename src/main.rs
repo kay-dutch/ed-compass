@@ -289,8 +289,8 @@ fn build_app(cli: &Cli, cfg: Config, capture_dir: PathBuf) -> Result<App> {
         let mut source = file_input::load(path)?;
         source.set_looping(cli.loop_input);
         let label = format!("file: {}", path.display());
-        let handle = capture::start_file(source, tx, cli.realtime || !cli.headless);
-        return Ok(App::new(cfg, label, handle, rx, capture_dir));
+        let handle = capture::start_file(source, tx.clone(), cli.realtime || !cli.headless);
+        return Ok(App::new(cfg, label, handle, tx, rx, capture_dir));
     }
 
     if let Some(signal) = cli.test_signal()? {
@@ -307,35 +307,50 @@ fn build_app(cli: &Cli, cfg: Config, capture_dir: PathBuf) -> Result<App> {
         );
         let label = format!("synthetic ({})", format.layout_name());
         let source = SyntheticSource::new(signal, format, cli.azimuth);
-        let handle = capture::start_synthetic(source, tx);
-        return Ok(App::new(cfg, label, handle, rx, capture_dir));
+        let handle = capture::start_synthetic(source, tx.clone());
+        return Ok(App::new(cfg, label, handle, tx, rx, capture_dir));
     }
 
     // Live capture.
     let devices = device::enumerate().context("enumerating audio endpoints")?;
     let requested = cli.device.clone().unwrap_or_else(|| cfg.device.clone());
-    let selected: AudioDevice = device::select(&devices, &requested).cloned().context(
-        "no audio output endpoint is available, so there is nothing to listen to.\n\
-         \n\
-         ED Compass captures what your speakers or headphones are playing. With no\n\
-         output device present — headphones unplugged, or none configured — there is\n\
-         no game audio to hear. It will not fall back to a microphone: that would\n\
-         record the room rather than the game.\n\
-         \n\
-         Plug in or enable an output device and start it again, or run without one\n\
-         using --test-landscape or --input FILE.",
-    )?;
+    let selected: Option<AudioDevice> = device::select(&devices, &requested).cloned();
+
+    let Some(selected) = selected else {
+        // Headless has no window to explain itself in, so there it stays fatal.
+        if cli.headless {
+            bail!("{NO_OUTPUT_DEVICE}");
+        }
+        // With a window, opening and saying so beats refusing to start. The
+        // usual cause is launching before the headphones are plugged in, and
+        // the app now notices when they are.
+        log::warn!("no audio output endpoint; waiting for one to appear");
+        return Ok(App::waiting_for_device(
+            cfg,
+            tx,
+            rx,
+            capture_dir,
+            "no audio output device — plug in headphones or speakers".into(),
+        ));
+    };
     log::info!("using {}", selected.display_name());
 
-    let handle = capture::start(&selected, tx)?;
-    Ok(App::new(
-        cfg,
-        selected.display_name(),
-        handle,
-        rx,
-        capture_dir,
-    ))
+    let handle = capture::start(&selected, tx.clone())?;
+    let mut app = App::new(cfg, selected.display_name(), handle, tx, rx, capture_dir);
+    app.reconnect_on_device_loss();
+    Ok(app)
 }
+
+/// Why there is nothing to listen to, at length, for the console.
+const NO_OUTPUT_DEVICE: &str = "no audio output endpoint is available, so there is nothing to listen to.\n\
+     \n\
+     ED Compass captures what your speakers or headphones are playing. With no\n\
+     output device present — headphones unplugged, or none configured — there is\n\
+     no game audio to hear. It will not fall back to a microphone: that would\n\
+     record the room rather than the game.\n\
+     \n\
+     Plug in or enable an output device and start it again, or run without one\n\
+     using --test-landscape or --input FILE.";
 
 /// Console mode: pump, report detections, exit on duration or end of input.
 fn run_headless(
