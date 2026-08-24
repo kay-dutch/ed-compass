@@ -24,9 +24,12 @@ lit when something is out there.
 
 <img src="docs/images/ed-compass.png" alt="The ED Compass analysis window: a live spectrogram of Elite's audio, with the direction compass, periodicity meter and detection log below it" width="820">
 
-<sub>The full view — everything the tool heard in the last few minutes. While
-flying you'd normally use the cockpit overlay instead.</sub>
+<sub>The full view — everything heard in the last few minutes.</sub>
 
+<img src="docs/images/ed-compass-overlay.png" alt="The ED Compass in-game overlay view: the same live spectrogram and lamp indicators" width="820">
+
+<sub>The overlay — the same spectrogram and lamps, over the cockpit. This is
+what you fly with.</sub>
 <!-- More screenshots -->
 
 ---
