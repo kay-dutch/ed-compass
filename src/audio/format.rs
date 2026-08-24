@@ -72,26 +72,26 @@ pub fn convert_to_f32(raw: &[u8], format: SampleFormat, out: &mut Vec<f32>) {
     out.reserve(count);
     match format {
         SampleFormat::F32 => {
-            for c in raw.chunks_exact(4) {
-                out.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+            for c in raw.as_chunks::<4>().0 {
+                out.push(f32::from_le_bytes(*c));
             }
         }
         SampleFormat::I16 => {
-            for c in raw.chunks_exact(2) {
-                let v = i16::from_le_bytes([c[0], c[1]]);
+            for c in raw.as_chunks::<2>().0 {
+                let v = i16::from_le_bytes(*c);
                 out.push(v as f32 / 32_768.0);
             }
         }
         SampleFormat::I24 => {
-            for c in raw.chunks_exact(3) {
+            for c in raw.as_chunks::<3>().0 {
                 // Sign-extend by landing the 24 bits in the high bytes of an i32.
                 let v = i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8;
                 out.push(v as f32 / 8_388_608.0);
             }
         }
         SampleFormat::I32 => {
-            for c in raw.chunks_exact(4) {
-                let v = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            for c in raw.as_chunks::<4>().0 {
+                let v = i32::from_le_bytes(*c);
                 out.push(v as f32 / 2_147_483_648.0);
             }
         }

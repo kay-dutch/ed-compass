@@ -463,7 +463,7 @@ mod tests {
     fn sine_lands_on_the_requested_frequency() {
         let mut s = SyntheticSource::new(TestSignal::Sine { hz: 1000.0 }, stereo(), 0.0);
         let buf = s.render_seconds(0.5);
-        let mono: Vec<f32> = buf.chunks_exact(2).map(|f| f[0]).collect();
+        let mono: Vec<f32> = buf.as_chunks::<2>().0.iter().map(|f| f[0]).collect();
 
         let size = 4096;
         let mut stft = Stft::new(size, size);
@@ -497,7 +497,7 @@ mod tests {
             0.0,
         );
         let buf = s.render_seconds(2.0);
-        let mono: Vec<f32> = buf.chunks_exact(2).map(|f| f[0]).collect();
+        let mono: Vec<f32> = buf.as_chunks::<2>().0.iter().map(|f| f[0]).collect();
 
         let size = 8192;
         let mut stft = Stft::new(size, size);
