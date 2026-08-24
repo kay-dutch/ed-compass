@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.4.6 — alpha
+
+* Start without active output device.
+
 ## v0.4.5 — alpha
 
 * Simplified cleanup: clean-up button erases all recordings.
