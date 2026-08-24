@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.4.7 — alpha
+
+* Bugfixes.
+
 ## v0.4.6 — alpha
 
 * Start without active output device.

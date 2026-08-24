@@ -1,6 +1,6 @@
 [package]
 name = "ed-compass"
-version = "0.4.6"
+version = "0.4.7"
 edition = "2024"
 # Let-chains in `if let ... && ...` form; stable since 1.88 on edition 2024.
 rust-version = "1.88"
