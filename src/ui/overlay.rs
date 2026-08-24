@@ -642,11 +642,24 @@ fn hud_lamp(
 /// dead ahead reads as nothing until the ship yaws a few degrees.
 pub const ROSE_DEADBAND_DEG: f32 = 3.0;
 
+/// Degrees out to which an off-axis bearing is still treated as marginal.
+///
+/// The dead-band alone left only two states, and everything past three degrees
+/// arrived in the colour that means "look here". In flight the bearing crosses
+/// that line constantly, so the rose flashed green almost continuously — the
+/// same failure the dead-band was added to fix, moved outward by three degrees.
+/// A middle band absorbs the crossings: green is kept for a bearing that has
+/// gone properly off-axis and stayed there.
+pub const ROSE_MARGINAL_DEG: f32 = 5.0;
+
 /// What the rose should draw for a given estimate.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum RoseNeedle {
-    /// Off-axis by more than the dead-band: a bearing worth flying towards.
+    /// Well off-axis: a bearing worth flying towards.
     Bearing(f32),
+    /// Off-axis, but not by much. A real measurement that has not yet earned
+    /// the colour reserved for a find.
+    Marginal(f32),
     /// Inside the dead-band. Balanced ambience pans dead centre, so this is
     /// the null result, and it is drawn in a colour that says so.
     Centred(f32),
@@ -661,8 +674,11 @@ pub fn rose_needle(estimate: &DirectionEstimate) -> Option<RoseNeedle> {
     if !estimate.is_usable() {
         return None;
     }
-    Some(if estimate.azimuth_deg.abs() >= ROSE_DEADBAND_DEG {
+    let off_axis = estimate.azimuth_deg.abs();
+    Some(if off_axis > ROSE_MARGINAL_DEG {
         RoseNeedle::Bearing(estimate.azimuth_deg)
+    } else if off_axis > ROSE_DEADBAND_DEG {
+        RoseNeedle::Marginal(estimate.azimuth_deg)
     } else {
         RoseNeedle::Centred(estimate.azimuth_deg)
     })
@@ -696,10 +712,14 @@ fn hud_rose(painter: &egui::Painter, rect: egui::Rect, estimate: &DirectionEstim
     }
 
     if let Some(needle_state) = rose_needle(estimate) {
-        // Green means "look at this"; red means "measured, and it is nothing".
-        // Keeping the eye trained on green is the whole point of the dead-band.
+        // Green means "look at this", and it is spent sparingly: the eye stops
+        // reading an instrument that lights all the time.
         let (azimuth_deg, colour, ghost) = match needle_state {
             RoseNeedle::Bearing(a) => (a, hud::GREEN, true),
+            // Blue reads as a measurement rather than a summons — visible at a
+            // glance, distinct from both neighbours, and not a colour the eye
+            // has been trained to chase.
+            RoseNeedle::Marginal(a) => (a, hud::BLUE, true),
             // Dark orange, the same colour as every other inactive element:
             // present and readable, but it does not pull the eye. Red did.
             RoseNeedle::Centred(a) => (a, hud::AMBER, false),
@@ -765,8 +785,27 @@ mod tests {
         e.azimuth_deg = 3.0;
         assert_eq!(
             rose_needle(&e),
-            Some(RoseNeedle::Bearing(3.0)),
-            "at the edge it becomes a bearing"
+            Some(RoseNeedle::Centred(3.0)),
+            "the dead-band includes its own edge"
+        );
+
+        // The middle band. Everything from here to five degrees used to arrive
+        // in the find colour, and in flight the bearing crosses three degrees
+        // constantly — so the rose flashed green almost continuously.
+        e.azimuth_deg = 3.1;
+        assert_eq!(rose_needle(&e), Some(RoseNeedle::Marginal(3.1)));
+        e.azimuth_deg = -5.0;
+        assert_eq!(
+            rose_needle(&e),
+            Some(RoseNeedle::Marginal(-5.0)),
+            "marginal to five degrees inclusive, and symmetric"
+        );
+
+        e.azimuth_deg = 5.1;
+        assert_eq!(
+            rose_needle(&e),
+            Some(RoseNeedle::Bearing(5.1)),
+            "past five it is a bearing worth the find colour"
         );
         e.azimuth_deg = -38.0;
         assert_eq!(rose_needle(&e), Some(RoseNeedle::Bearing(-38.0)));
