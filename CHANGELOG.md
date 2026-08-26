@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.4.8 — alpha
+
+* Directional indicator coloring changes. 
+
 ## v0.4.7 — alpha
 
 * Bugfixes.
