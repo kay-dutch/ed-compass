@@ -162,6 +162,29 @@ pub fn coherence(cross: Complex32, power_a: f32, power_b: f32) -> f32 {
     (cross.norm_sqr() / denom).clamp(0.0, 1.0)
 }
 
+/// A band cross-spectrum together with the channel powers it must be divided by.
+///
+/// These travel as one value because they are only meaningful together: coherence
+/// is a ratio in which the STFT's window scaling has to cancel, and it only
+/// cancels if numerator and denominator were accumulated the same way. Passing
+/// the cross-spectrum next to a *separately* scaled power array is what made
+/// stereo confidence read 1.0 for every source, coherent or not — the ratio was
+/// inflated by 1/scale² and the clamp hid it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CrossSpectrum {
+    /// `Σ A·conj(B)` over the band.
+    pub cross: Complex32,
+    /// `Σ|A|²` and `Σ|B|²` over the same bins, in the same units as `cross`.
+    pub power_a: f32,
+    pub power_b: f32,
+}
+
+impl CrossSpectrum {
+    pub fn coherence(&self) -> f32 {
+        coherence(self.cross, self.power_a, self.power_b)
+    }
+}
+
 /// Pick an estimator for the layout and produce a bearing.
 ///
 /// `cross_lr` is the band cross-spectrum between the first two directional
@@ -170,7 +193,7 @@ pub fn coherence(cross: Complex32, power_a: f32, power_b: f32) -> f32 {
 pub fn estimate(
     powers: &[f32],
     layout: &[ChannelInfo],
-    cross_lr: Option<Complex32>,
+    cross_lr: Option<CrossSpectrum>,
 ) -> DirectionEstimate {
     debug_assert_eq!(powers.len(), layout.len(), "one power per channel");
 
@@ -196,7 +219,9 @@ pub fn estimate(
                 return DirectionEstimate::insufficient();
             };
             let confidence = match cross_lr {
-                Some(cross) => coherence(cross, powers[li], powers[ri]),
+                // From the cross-spectrum's own powers, never from `powers`:
+                // see CrossSpectrum for what happens when they disagree.
+                Some(c) => c.coherence(),
                 // Without a cross-spectrum we can only report that *something*
                 // is there, not that the two channels are related.
                 None => energy_vector(powers, layout).map(|(_, c)| c).unwrap_or(0.0),
@@ -454,7 +479,11 @@ mod tests {
         // The spec calls this out: it must read 0°, not garbage.
         let layout = channel_layout(MASK_STEREO, 2);
         let a = Complex32::new(1.0, 0.5);
-        let cross = a * a.conj();
+        let cross = CrossSpectrum {
+            cross: a * a.conj(),
+            power_a: a.norm_sqr(),
+            power_b: a.norm_sqr(),
+        };
         let e = estimate(&[a.norm_sqr(), a.norm_sqr()], &layout, Some(cross));
         near(e.azimuth_deg, 0.0, 1e-4);
         near(e.confidence, 1.0, 1e-4);
@@ -510,5 +539,65 @@ mod tests {
         // All-silent input must not panic or produce NaN.
         let (_, peak) = gcc_phat(&[0.0; 256], &[0.0; 256], 16).unwrap();
         assert!(peak.is_finite());
+    }
+}
+
+#[cfg(test)]
+mod coherence_scaling_tests {
+    use super::*;
+
+    /// The pipeline accumulates `powers` through `Stft::powers`, which scales by
+    /// `(2/Σw)²`, while it accumulates the cross-spectrum raw. This reproduces
+    /// that pairing and shows what it does to the ratio.
+    #[test]
+    fn scaled_powers_against_a_raw_cross_spectrum_saturate_confidence() {
+        // Two channels that are deliberately *not* one source: unrelated phases,
+        // so true coherence is near zero.
+        let n = 2048;
+        let mut x = 12345u64;
+        let mut rnd = || {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((x >> 33) as f32 / (1u64 << 31) as f32) * std::f32::consts::TAU
+        };
+        let left: Vec<Complex32> = (0..n)
+            .map(|_| {
+                let t = rnd();
+                Complex32::new(t.cos(), t.sin())
+            })
+            .collect();
+        let right: Vec<Complex32> = (0..n)
+            .map(|_| {
+                let t = rnd();
+                Complex32::new(t.cos(), t.sin())
+            })
+            .collect();
+
+        let mut cross = Complex32::new(0.0, 0.0);
+        let (mut raw_l, mut raw_r) = (0.0f32, 0.0f32);
+        for (a, b) in left.iter().zip(&right) {
+            cross += a * b.conj();
+            raw_l += a.norm_sqr();
+            raw_r += b.norm_sqr();
+        }
+
+        let truth = coherence(cross, raw_l, raw_r);
+        assert!(
+            truth < 0.05,
+            "unrelated channels are genuinely incoherent: {truth}"
+        );
+
+        // What the pipeline actually passes: a 4096-point Hann window sums to
+        // about half its length, so the scale is (2/2048)².
+        let amplitude_scale = 2.0f32 / 2048.0;
+        let s = amplitude_scale * amplitude_scale;
+        let reported = coherence(cross, raw_l * s, raw_r * s);
+
+        assert_eq!(
+            reported, 1.0,
+            "mixing scaled powers with a raw cross-spectrum inflates the ratio by \
+             1/s² (~1e12) and the clamp turns every measurement into 1.0"
+        );
     }
 }

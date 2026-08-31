@@ -279,6 +279,15 @@ pub struct AnalysisEngine {
     /// is what a closing event's bearing is computed from.
     event_powers: Vec<f64>,
     event_cross: Complex32,
+    /// Unscaled |X|^2 sums for channels 0 and 1 over the same bins and frames as
+    /// `event_cross`.
+    ///
+    /// Kept separately from `event_powers` rather than reused: those carry the
+    /// STFT's window scaling, and coherence is a ratio in which that scaling must
+    /// cancel exactly. Accumulating the raw `norm_sqr` here makes the ratio
+    /// correct by construction instead of by remembering to divide it out.
+    event_p0: f64,
+    event_p1: f64,
     event_frames: usize,
     /// Live bearing, updated every frame that has any activity.
     /// Bearing of the material that triggered the current event. This is what a
@@ -293,6 +302,10 @@ pub struct AnalysisEngine {
     /// averaging across the wrap point produces a bearing pointing at nothing.
     live_powers: Vec<f64>,
     live_cross: Complex32,
+    /// Unscaled |X|² for channels 0 and 1, smoothed alongside `live_cross` so the
+    /// coherence ratio is formed from consistently accumulated terms.
+    live_p0: f64,
+    live_p1: f64,
 
     deinterleaved: Vec<Vec<f32>>,
     frames_analyzed: u64,
@@ -424,11 +437,15 @@ impl AnalysisEngine {
             ),
             event_powers: vec![0.0; streams],
             event_cross: Complex32::new(0.0, 0.0),
+            event_p0: 0.0,
+            event_p1: 0.0,
             event_frames: 0,
             event_direction: DirectionEstimate::insufficient(),
             live_direction: DirectionEstimate::insufficient(),
             live_powers: vec![0.0; streams],
             live_cross: Complex32::new(0.0, 0.0),
+            live_p0: 0.0,
+            live_p1: 0.0,
             deinterleaved: vec![Vec::new(); if direction_finding { channels } else { 0 }],
             frames_analyzed: 0,
             gap_count: 0,
@@ -628,6 +645,8 @@ impl AnalysisEngine {
     fn reset_event_accumulator(&mut self) {
         self.event_powers.fill(0.0);
         self.event_cross = Complex32::new(0.0, 0.0);
+        self.event_p0 = 0.0;
+        self.event_p1 = 0.0;
         self.event_frames = 0;
     }
 
@@ -1062,6 +1081,7 @@ impl AnalysisEngine {
         // One frame's worth of energy across the band we care about.
         let mut powers = vec![0.0f64; channels];
         let mut cross = Complex32::new(0.0, 0.0);
+        let (mut raw_p0, mut raw_p1) = (0.0f64, 0.0f64);
         for bin in 0..bins {
             let hz = self.geometry.bin_hz(bin);
             if hz < lo || hz > hi {
@@ -1071,6 +1091,8 @@ impl AnalysisEngine {
                 *power += self.channel_powers[c][bin] as f64;
             }
             cross += self.spectra[0][bin] * self.spectra[1][bin].conj();
+            raw_p0 += self.spectra[0][bin].norm_sqr() as f64;
+            raw_p1 += self.spectra[1][bin].norm_sqr() as f64;
         }
 
         // A second or so of memory, so the needle settles instead of twitching
@@ -1081,10 +1103,20 @@ impl AnalysisEngine {
         }
         let a = SMOOTHING as f32;
         self.live_cross = self.live_cross * (1.0 - a) + cross * a;
+        self.live_p0 += (raw_p0 - self.live_p0) * SMOOTHING;
+        self.live_p1 += (raw_p1 - self.live_p1) * SMOOTHING;
 
         let smoothed: Vec<f32> = self.live_powers.iter().map(|p| *p as f32).collect();
         let layout = self.format.layout();
-        self.live_direction = direction::estimate(&smoothed, &layout, Some(self.live_cross));
+        self.live_direction = direction::estimate(
+            &smoothed,
+            &layout,
+            Some(direction::CrossSpectrum {
+                cross: self.live_cross,
+                power_a: self.live_p0 as f32,
+                power_b: self.live_p1 as f32,
+            }),
+        );
     }
 
     /// Accumulate per-channel power over the bins currently above threshold.
@@ -1107,6 +1139,8 @@ impl AnalysisEngine {
             }
             if channels >= 2 {
                 self.event_cross += self.spectra[0][bin] * self.spectra[1][bin].conj();
+                self.event_p0 += self.spectra[0][bin].norm_sqr() as f64;
+                self.event_p1 += self.spectra[1][bin].norm_sqr() as f64;
             }
         }
 
@@ -1115,7 +1149,11 @@ impl AnalysisEngine {
             let powers: Vec<f32> = self.event_powers.iter().map(|p| *p as f32).collect();
             let layout = self.format.layout();
             let cross = if channels >= 2 {
-                Some(self.event_cross)
+                Some(direction::CrossSpectrum {
+                    cross: self.event_cross,
+                    power_a: self.event_p0 as f32,
+                    power_b: self.event_p1 as f32,
+                })
             } else {
                 None
             };

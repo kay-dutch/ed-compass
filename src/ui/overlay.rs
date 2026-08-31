@@ -364,7 +364,14 @@ impl OverlayState {
         let (keying_detail, structure_detail) = detail_lines(app);
         let signal = app.signal_present();
         let cypher = keying || structure;
-        let anomaly = matches!(app.status(), crate::app::Status::Anomaly);
+        // A traced stroke reports to the quietest rung.
+        //
+        // It went SIGNAL -> CYPHER -> here, each step taken after flying it. The
+        // tracer marks a great deal of ordinary flight, and every rung it was
+        // given became a rung the eye learned to ignore. ANOMALY is where
+        // "something changed, and nothing here can say what" belongs, and it is
+        // already coloured to be ignorable.
+        let anomaly = matches!(app.status(), crate::app::Status::Anomaly) || app.traced_recently();
         // Whichever of the two is actually firing gets to describe the rung.
         let cypher_detail = if keying {
             keying_detail
@@ -900,6 +907,33 @@ mod tests {
 
     /// A recognised signal reaches the top whether or not the lower detectors
     /// happen to be firing this instant.
+    #[test]
+    fn only_a_named_detection_reaches_signal() {
+        // Pinned because moving a detector between rungs is a deliberate
+        // decision, and moving one back should be one too.
+        //
+        // SIGNAL is reserved for a detection that can be *named*: the Landscape
+        // Signal by its period, or Thargoid keying by its decode. A traced stroke
+        // can be neither, and it marks enough of ordinary flight that giving it
+        // any louder rung taught the eye to ignore that rung — first SIGNAL, then
+        // CYPHER. It reports to ANOMALY.
+        assert_eq!(
+            Rung::of(true, true, false),
+            Some(Rung::Cypher),
+            "keying or repeating structure, unnamed, stops at CYPHER"
+        );
+        assert_eq!(
+            Rung::of(true, false, false),
+            Some(Rung::Anomaly),
+            "a traced stroke alone reaches only ANOMALY"
+        );
+        assert_eq!(
+            Rung::of(true, true, true),
+            Some(Rung::Signal),
+            "and SIGNAL needs something nameable"
+        );
+    }
+
     #[test]
     fn a_named_signal_reaches_the_top_rung_alone() {
         assert_eq!(Rung::of(false, false, true), Some(Rung::Signal));

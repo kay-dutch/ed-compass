@@ -335,14 +335,28 @@ impl App {
     /// marks, correctly placed. The lamp answers "is something happening"; the
     /// strip answers "when did things happen". Those are different windows, and
     /// giving them the same one made the lamp useless.
+    /// Only what can be *named*: the Landscape Signal by its period, or a keyed
+    /// transmission by its decode.
+    ///
+    /// A traced stroke used to count here too, and that was the wrong rung for
+    /// it. The tracer is the least-established detector in the tool — it has
+    /// never been validated against a reference sample anyone trusts — yet it was
+    /// the only thing able to light the rung that means "this is a find". In
+    /// flight it carpeted the timeline with the colour reserved for certainty.
+    /// It now reports to ANOMALY.
     pub fn signal_present(&self) -> bool {
-        if self.landscape_present
+        self.landscape_present
             || self
                 .morse()
                 .is_some_and(|m| m.is_present(self.cfg.morse_threshold))
-        {
-            return true;
-        }
+    }
+
+    /// Has the tracer followed a stroke in the last few seconds?
+    ///
+    /// Feeds the ANOMALY rung: something changed and nothing here can say what.
+    /// Timed from when the stroke happened rather than from when it was noticed,
+    /// for the reason given on [`Self::signal_present`].
+    pub fn traced_recently(&self) -> bool {
         let Some(engine) = self.engine.as_ref() else {
             return false;
         };

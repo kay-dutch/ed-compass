@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.9 — alpha
+
+* SIGNAL is now reserved for known signals only.
+* Bugfix: directional indicator reported full confidence for everything.
+
 ## v0.4.8 — alpha
 
 * Directional indicator coloring changes. 

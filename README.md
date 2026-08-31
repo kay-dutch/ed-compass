@@ -71,9 +71,9 @@ goes**, not which one is lit.
 
 | | |
 |---|---|
-| **SIGNAL** | The strongest claim. Either something it can name — the Landscape Signal by its period, or a keyed transmission such as Thargoid Sensor Morse — or a stroke it has traced across the spectrogram. The line beneath says which. |
-| **CYPHER** | Something carries deliberate structure: tones keyed on and off, or a shape drawn into the spectrogram. |
-| **ANOMALY** | Something departed from the background. The quietest rung, and the most often lit — ordinary ship noise sets it off regularly, which is why it is coloured to be ignorable. |
+| **SIGNAL** | The strongest claim, and the rarest: something it can *name* — the Landscape Signal by its period, or a keyed transmission such as Thargoid Sensor Morse. The line beneath says which. |
+| **CYPHER** | Something carries deliberate structure the tool cannot name: tones keyed on and off, or a repeating shape in the spectrogram. |
+| **ANOMALY** | Something departed from the background, or a line was traced across the spectrogram. The quietest rung, and the most often lit — ordinary ship noise sets it off regularly, which is why it is coloured to be ignorable. |
 
 Beside them, a live spectrogram of what the game is playing, marked up as it
 goes:
