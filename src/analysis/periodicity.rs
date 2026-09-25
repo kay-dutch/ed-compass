@@ -186,9 +186,59 @@ pub const LANDSCAPE_MIN_PROMINENCE: f32 = 0.50;
 /// the keying score separates the real signal from ordinary ship ambience —
 /// measured, they overlap completely — but the period does, by a wide margin.
 pub fn matches_landscape(result: &PeriodicityResult, tolerance_seconds: f32) -> bool {
-    (result.period_seconds - LANDSCAPE_PERIOD_SECONDS).abs() <= tolerance_seconds
+    landscape_multiple(result.period_seconds, tolerance_seconds).is_some()
         && result.confidence >= LANDSCAPE_MIN_CONFIDENCE
         && result.prominence >= LANDSCAPE_MIN_PROMINENCE
+}
+
+/// Largest whole multiple of the Landscape period a detector may lock onto and
+/// still be reporting the same signal.
+///
+/// Folding and autocorrelation both align at *any* whole multiple of the true
+/// period — a signal folded at twice its period simply produces two copies of
+/// itself, which is still a clean fold. So a detector reporting 4x is reporting
+/// the signal, and testing only the fundamental throws that away.
+///
+/// It happened: a confirmed Landscape encounter folded at 436.7 s, which is
+/// 4 x 109.17 — within 0.3% — and was reported as an ordinary anomaly because
+/// 436.7 is not 109.5.
+///
+/// Four rather than more, measured across 102 captures carrying a fold period:
+/// allowing up to 4 matches 6 of them, and allowing 5 jumps to 13. The extra
+/// hits land 1.5-2 s off after division, which at n=5 means a +/-10 s window on
+/// the raw period — wide enough to catch unrelated ambience, and the jump in
+/// count is what coincidence looks like.
+pub const LANDSCAPE_MAX_MULTIPLE: u32 = 4;
+
+/// Minimum whole cycles a fold must contain before its period is trusted.
+///
+/// The fold has no confidence or prominence of its own, so the count of cycles
+/// stands in for both: a period found over three repeats is a period, a period
+/// found over one is an artefact of the search range.
+pub const LANDSCAPE_MIN_FOLD_CYCLES: f32 = 3.0;
+
+/// Which multiple of the Landscape period this one is consistent with, if any.
+///
+/// The tolerance applies to the period *after* division, so it is a statement
+/// about the fundamental in every case rather than a window that silently widens
+/// with the multiple.
+pub fn landscape_multiple(period_seconds: f32, tolerance_seconds: f32) -> Option<u32> {
+    if !period_seconds.is_finite() || period_seconds <= 0.0 {
+        return None;
+    }
+    (1..=LANDSCAPE_MAX_MULTIPLE).find(|n| {
+        (period_seconds / *n as f32 - LANDSCAPE_PERIOD_SECONDS).abs() <= tolerance_seconds
+    })
+}
+
+/// Whether a fold is consistent with the Landscape Signal.
+///
+/// Separate from [`matches_landscape`] because a fold carries different evidence:
+/// no confidence or prominence, but a cycle count, which is the better measure of
+/// whether its period means anything.
+pub fn fold_matches_landscape(period_seconds: f32, cycles: f32, tolerance_seconds: f32) -> bool {
+    cycles >= LANDSCAPE_MIN_FOLD_CYCLES
+        && landscape_multiple(period_seconds, tolerance_seconds).is_some()
 }
 
 #[cfg(test)]
@@ -203,6 +253,53 @@ mod tests {
                 if phase < width { level } else { floor }
             })
             .collect()
+    }
+
+    #[test]
+    fn a_whole_multiple_of_the_period_is_the_same_signal() {
+        // The case that prompted this: a confirmed encounter folded at 436.7 s,
+        // which is 4 x 109.17. Testing only the fundamental reported it as an
+        // ordinary anomaly.
+        assert_eq!(landscape_multiple(436.7, 2.0), Some(4));
+        assert_eq!(landscape_multiple(219.0, 2.0), Some(2), "exactly twice");
+        assert_eq!(
+            landscape_multiple(109.5, 2.0),
+            Some(1),
+            "and the fundamental"
+        );
+    }
+
+    #[test]
+    fn the_multiple_is_capped_and_the_tolerance_does_not_widen_with_it() {
+        // Five times would be 547.5. Allowing it took the match rate across 102
+        // captures from 6 to 13, with the extra hits 1.5-2 s off after division.
+        assert_eq!(landscape_multiple(547.5, 2.0), None, "beyond the cap");
+
+        // The tolerance applies after division, so it stays a statement about the
+        // fundamental. At 4x, being 2 s out on the *raw* period is only 0.5 s out
+        // on the fundamental and must still match; being 2 s out on the
+        // fundamental must not.
+        assert_eq!(landscape_multiple(438.0 + 2.0, 2.0), Some(4));
+        assert_eq!(landscape_multiple(4.0 * (109.5 + 3.0), 2.0), None);
+    }
+
+    #[test]
+    fn a_fold_needs_enough_cycles_before_its_period_counts() {
+        // The fold carries no confidence or prominence, so the cycle count is the
+        // only evidence that its period is real rather than an artefact of the
+        // search range.
+        assert!(
+            fold_matches_landscape(436.7, 5.8, 2.0),
+            "the observed encounter"
+        );
+        assert!(
+            !fold_matches_landscape(436.7, 1.5, 2.0),
+            "the same period over one and a half cycles proves nothing"
+        );
+        assert!(
+            !fold_matches_landscape(300.0, 20.0, 2.0),
+            "and the period must match"
+        );
     }
 
     #[test]

@@ -408,9 +408,22 @@ impl App {
         // made while a track is selected is marked suspect in the display.
         self.keying_suspect = keying && self.game_state().music_playing();
 
-        self.landscape_present = engine.periodicity().is_some_and(|p| {
+        // Both routes to the period, because they fail differently. The live
+        // autocorrelation never found it at all — measured across 465 captures,
+        // not one matched — while the fold found it repeatedly, at whole
+        // multiples. Consulting only the live one is why a confirmed encounter
+        // showed as an ordinary anomaly.
+        let live_landscape = engine.periodicity().is_some_and(|p| {
             crate::analysis::periodicity::matches_landscape(&p, LANDSCAPE_TOLERANCE_SECONDS)
         });
+        let folded_landscape = engine.folded().is_some_and(|f| {
+            crate::analysis::periodicity::fold_matches_landscape(
+                f.period_seconds,
+                f.cycles,
+                LANDSCAPE_TOLERANCE_SECONDS,
+            )
+        });
+        self.landscape_present = live_landscape || folded_landscape;
 
         // Keep the audio on the *rising edge*. The primary detectors used to
         // light up without recording anything, because only the novelty-event
