@@ -8,7 +8,7 @@
 > The application is stable, and your settings and recordings carry forward from
 > one version to the next. What it *detects* is still provisional: detector
 > thresholds are being refined as more recordings come in. Try it, and please do
-> report what you find — but don't build a discovery claim on it yet.
+> report what you find.
 
 **Elite Dangerous hides signals in its audio. This listens for them while you fly.**
 
