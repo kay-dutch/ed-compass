@@ -88,14 +88,14 @@ jobs:
             dist/ed-compass-*-win64.zip
             dist/SHA256SUMS.txt
           generate_release_notes: true
-          # Flagged honestly: the README carries a pre-release warning, and this
-          # build has not yet survived a long unattended session. GitHub keeps
-          # a pre-release out of the repo's headline "Latest release" slot.
-          prerelease: true
+          # Not a pre-release from 0.5.0. The alphas were flagged because the
+          # build had not survived long unattended sessions; it now has. The flag
+          # also kept every release out of the repo's "Latest release" slot, so
+          # the releases/latest link returned nothing at all.
+          prerelease: false
           body: |
-            > **Pre-release.** Early build, published for testing. Detector
-            > thresholds and file formats are still changing, and results should
-            > be treated as provisional.
+            > **Beta.** Stable to run, and settings and recordings carry forward
+            > between versions. Detection results are still provisional.
 
             ## Install
 

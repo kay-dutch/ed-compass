@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.5.0 — beta
+
+* First beta. ED Compass runs through long sessions without trouble, and from here
+  your settings and recordings carry forward from one version to the next. What it
+  detects is still provisional.
+* Bugfix: the Landscape Signal was often detected but shown as an ordinary anomaly
+  instead of lighting SIGNAL.
+
 ## v0.4.9 — alpha
 
 * SIGNAL is now reserved for known signals only.
