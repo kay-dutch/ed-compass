@@ -1,6 +1,9 @@
 # ED Compass
 
+[![Licence][badge-licence]](./LICENSE)
+[![Rust][badge-rust]](https://www.rust-lang.org/)
 [![Status](https://img.shields.io/badge/STATUS-BETA%20RELEASE-D16E00?style=for-the-badge)](../../releases)
+[![Elite Dangerous][badge-ed]](https://www.elitedangerous.com/)
 
 > [!IMPORTANT]
 > ## BETA RELEASE
@@ -177,9 +180,7 @@ Frontier.
 
 o7
 
-[![Licence][badge-licence]](./LICENSE)
-[![Rust][badge-rust]](https://www.rust-lang.org/)
-[![Elite Dangerous][badge-ed]](https://www.elitedangerous.com/)
+
 
 [badge-licence]: https://img.shields.io/github/license/kay-dutch/ed-compass?style=for-the-badge
 [badge-rust]: https://img.shields.io/badge/Rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white
