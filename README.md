@@ -1,5 +1,7 @@
 # ED Compass
 
+**Elite Dangerous hides signals in its audio. This listens for them while you fly.**
+
 [![Licence][badge-licence]](./LICENSE)
 [![Rust][badge-rust]](https://www.rust-lang.org/)
 [![Status](https://img.shields.io/badge/STATUS-BETA%20RELEASE-D16E00?style=for-the-badge)](../../releases)
@@ -12,8 +14,6 @@
 > one version to the next. What it *detects* is still provisional: detector
 > thresholds are being refined as more recordings come in. Try it, and please do
 > report what you find.
-
-**Elite Dangerous hides signals in its audio. This listens for them while you fly.**
 
 There is something in the black that transmits. The
 [Landscape Signal](https://canonn.science/codex/cartographics/the-landscape-signal/)
