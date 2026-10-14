@@ -4,7 +4,7 @@
 
 [![Licence][badge-licence]](./LICENSE)
 [![Rust][badge-rust]](https://www.rust-lang.org/)
-[![Status](https://img.shields.io/badge/STATUS-BETA%20RELEASE-D16E00?style=for-the-badge)](../../releases)
+[![Status](https://img.shields.io/badge/STATUS-BETA%20RELEASE-F07B05?style=for-the-badge)](../../releases)
 [![Elite Dangerous][badge-ed]](https://www.elitedangerous.com/)
 
 > [!IMPORTANT]
