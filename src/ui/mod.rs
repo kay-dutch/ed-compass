@@ -103,7 +103,10 @@ fn native_options(backend: Backend) -> eframe::NativeOptions {
     }
 }
 
-pub fn run(app: App, preferred: Backend) -> Result<()> {
+pub fn run(mut app: App, preferred: Backend) -> Result<()> {
+    // The interface runs on the thread that pumps the analysis, so nothing slow
+    // may run inline there.
+    app.analyse_in_background();
     // The application is handed over only when a window actually opens. If the
     // renderer cannot start, it is still here to give to the other one.
     let slot = std::rc::Rc::new(std::cell::RefCell::new(Some(app)));

@@ -44,6 +44,24 @@ const PROMINENCE_MIN_RATIO: f64 = 12.0;
 /// hour of history — so this is what keeps it affordable.
 const FOLD_INTERVAL_SECONDS: f32 = 30.0;
 
+/// One fold search and its structure score: the expensive part, on whichever
+/// thread `update_fold` puts it.
+fn compute_fold(
+    history: &crate::analysis::spectrogram::SpectrogramHistory,
+    fps: f32,
+) -> Option<(fold::Folded, StructureScore)> {
+    let folded = fold::search(
+        history,
+        fps,
+        FOLD_MIN_PERIOD_SECONDS,
+        FOLD_MAX_PERIOD_SECONDS,
+        FOLD_PHASES,
+    )?;
+    let image = folded.to_image();
+    let score = crate::analysis::structure::analyze(&image, folded.phases, folded.bands);
+    Some((folded, score))
+}
+
 /// Period range searched, in seconds. The Landscape Signal's 109.5 s sits well
 /// inside it, and the range is deliberately wider than any one known signal.
 const FOLD_MIN_PERIOD_SECONDS: f32 = 30.0;
@@ -205,6 +223,10 @@ pub struct AnalysisEngine {
     /// re-folding faster than this would re-derive the same answer.
     fold_countdown: usize,
     fold_interval: usize,
+    /// Search on a worker thread rather than inline. See `update_fold`.
+    fold_in_background: bool,
+    /// The search under way on that thread, if one is.
+    fold_job: Option<crossbeam_channel::Receiver<Option<(fold::Folded, StructureScore)>>>,
     /// Rolling health statistics, accumulated as audio arrives rather than by
     /// rescanning the ring.
     health: HealthWindow,
@@ -391,6 +413,8 @@ impl AnalysisEngine {
             folded_structure: StructureScore::empty(),
             fold_countdown: 0,
             fold_interval: (frames_per_second * FOLD_INTERVAL_SECONDS).round().max(1.0) as usize,
+            fold_in_background: false,
+            fold_job: None,
             longterm_fps: frames_per_second / frames_per_summary as f32,
             health: HealthWindow::new(
                 cfg.health_window_seconds,
@@ -873,26 +897,79 @@ impl AnalysisEngine {
     /// average, which for the Landscape Signal is about four minutes of
     /// listening — so this is quiet at the start of a session and becomes more
     /// sensitive the longer the ship sits still.
+    ///
+    /// # Off the interface's thread
+    ///
+    /// The search is the most expensive thing the tool does, and its cost grows
+    /// with the history: measured at 0.5 s with ten minutes, 0.8 s with half an
+    /// hour, 2.5 s with the full hour. Run inline it froze the window — and the
+    /// overlay with it — for that long, every 30 seconds, all session. A
+    /// six-hour log showed 270 such stalls averaging 1.2 s, the pilot's
+    /// "hiccups" in flight. With `fold_in_background` set, the history is copied
+    /// (about a megabyte) and searched on a worker; the result is picked up on a
+    /// later frame. Headless and tests keep it inline, where nothing is waiting
+    /// on a frame and a result that depends on thread timing would make offline
+    /// analysis non-deterministic.
     fn update_fold(&mut self) {
+        if let Some(job) = &self.fold_job {
+            match job.try_recv() {
+                Ok(result) => {
+                    self.fold_job = None;
+                    if let Some((folded, score)) = result {
+                        self.folded_structure = score;
+                        self.folded = Some(folded);
+                    }
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+                Err(crossbeam_channel::TryRecvError::Disconnected) => self.fold_job = None,
+            }
+        }
         if self.fold_countdown > 0 {
             self.fold_countdown -= 1;
             return;
         }
         self.fold_countdown = self.fold_interval;
 
-        let Some(folded) = fold::search(
-            &self.longterm_excess,
-            self.longterm_fps,
-            FOLD_MIN_PERIOD_SECONDS,
-            FOLD_MAX_PERIOD_SECONDS,
-            FOLD_PHASES,
-        ) else {
+        if !self.fold_in_background {
+            if let Some((folded, score)) = compute_fold(&self.longterm_excess, self.longterm_fps) {
+                self.folded_structure = score;
+                self.folded = Some(folded);
+            }
             return;
-        };
-        let image = folded.to_image();
-        self.folded_structure =
-            crate::analysis::structure::analyze(&image, folded.phases, folded.bands);
-        self.folded = Some(folded);
+        }
+        // One search at a time. If the last is still running, this tick is
+        // skipped rather than queued behind it.
+        if self.fold_job.is_some() {
+            return;
+        }
+        let history = self.longterm_excess.clone();
+        let fps = self.longterm_fps;
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let spawned = std::thread::Builder::new()
+            .name("fold-search".into())
+            .spawn(move || {
+                let _ = tx.send(compute_fold(&history, fps));
+            });
+        match spawned {
+            Ok(_) => self.fold_job = Some(rx),
+            Err(e) => log::warn!("could not start the fold search: {e}"),
+        }
+    }
+
+    /// Search on a worker thread instead of inline. For the windowed app.
+    pub fn set_fold_in_background(&mut self, on: bool) {
+        self.fold_in_background = on;
+    }
+
+    /// Wait for a background search under way and take its result. For a
+    /// caller about to read the fold with nothing else to do meanwhile.
+    pub fn settle_fold(&mut self) {
+        if let Some(job) = self.fold_job.take()
+            && let Ok(Some((folded, score))) = job.recv()
+        {
+            self.folded_structure = score;
+            self.folded = Some(folded);
+        }
     }
 
     /// The averaged cycle, once there is enough history to make one.
@@ -1277,6 +1354,40 @@ mod tests {
             done += n;
         }
         out
+    }
+
+    #[test]
+    fn the_fold_found_in_the_background_is_the_one_found_inline() {
+        // The worker exists so the window never waits on the search. It must not
+        // change the answer: since a fold at a multiple of the period now lights
+        // SIGNAL, a background search that returned nothing, or something else,
+        // would quietly cost the one detection that names the Landscape.
+        let f = format(2, MASK_STEREO);
+        let mut inline = AnalysisEngine::new(fast_config(), f.clone());
+        let mut background = AnalysisEngine::new(fast_config(), f.clone());
+        background.set_fold_in_background(true);
+        feed(
+            &mut inline,
+            &mut SyntheticSource::new(TestSignal::Landscape, f.clone(), 0.0),
+            330.0,
+        );
+        feed(
+            &mut background,
+            &mut SyntheticSource::new(TestSignal::Landscape, f, 0.0),
+            330.0,
+        );
+        background.settle_fold();
+
+        let here = inline.folded().expect("the inline search folds");
+        let there = background
+            .folded()
+            .expect("the worker's result is picked up");
+        assert!(
+            (here.period_seconds - there.period_seconds).abs() < 1.0,
+            "same history, same period: inline {} s, background {} s",
+            here.period_seconds,
+            there.period_seconds
+        );
     }
 
     #[test]

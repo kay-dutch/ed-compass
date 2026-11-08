@@ -104,6 +104,8 @@ pub struct App {
     /// probing on their behalf would attach a real one underneath them.
     reconnect: bool,
     last_device_probe: Option<Instant>,
+    /// Run long analysis off the pumping thread. See `analyse_in_background`.
+    background_analysis: bool,
 
     engine: Option<AnalysisEngine>,
     journal: Option<JournalWatcher>,
@@ -183,6 +185,7 @@ impl App {
             tx,
             reconnect: false,
             last_device_probe: None,
+            background_analysis: false,
             engine: None,
             journal,
             pending: Vec::new(),
@@ -276,7 +279,7 @@ impl App {
 
     fn rebuild_engine(&mut self) {
         if let Some(format) = self.last_format.clone() {
-            self.engine = Some(AnalysisEngine::new(self.cfg.clone(), format));
+            self.engine = Some(self.new_engine(format));
             self.pending.clear();
             // A format means the endpoint is delivering again, so any recorded
             // failure is history. Clearing it together with the status keeps
@@ -701,6 +704,21 @@ impl App {
     }
 
     /// Watch for a device if this one is ever lost. Live capture only.
+    /// Keep long analysis off the calling thread. For the windowed app, whose
+    /// interface runs on the thread that pumps; see `AnalysisEngine::update_fold`.
+    pub fn analyse_in_background(&mut self) {
+        self.background_analysis = true;
+        if let Some(engine) = self.engine.as_mut() {
+            engine.set_fold_in_background(true);
+        }
+    }
+
+    fn new_engine(&self, format: StreamFormat) -> AnalysisEngine {
+        let mut engine = AnalysisEngine::new(self.cfg.clone(), format);
+        engine.set_fold_in_background(self.background_analysis);
+        engine
+    }
+
     pub fn reconnect_on_device_loss(&mut self) {
         self.reconnect = true;
     }
@@ -787,7 +805,7 @@ impl App {
                         );
                     }
                     self.last_format = Some(format.clone());
-                    self.engine = Some(AnalysisEngine::new(self.cfg.clone(), format));
+                    self.engine = Some(self.new_engine(format));
                     self.status = Status::Warming;
                 }
                 Ok(CaptureMessage::Audio(samples)) if self.paused => {

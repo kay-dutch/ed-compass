@@ -51,7 +51,9 @@ impl DbRange {
 /// Frames are stored contiguously at `frame_width` bytes each. `total_frames`
 /// counts every frame ever pushed, so a column can be addressed by an absolute
 /// index for as long as it remains resident.
-#[derive(Debug)]
+// Clone, so the fold search can take a copy to a worker thread: about a
+// megabyte for an hour of the long-term tier, far cheaper than the search.
+#[derive(Debug, Clone)]
 pub struct SpectrogramHistory {
     data: Vec<u8>,
     frame_width: usize,

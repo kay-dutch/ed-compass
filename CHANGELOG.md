@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.6.2 — beta
+
+* Bugfixes.
+
 ## v0.6.1 — beta
 
 * Installer design fixes.
