@@ -40,7 +40,7 @@ pub fn draw(ui: &mut egui::Ui, updater: &mut Updater) {
                     None => {
                         ui.label(
                             egui::RichText::new(format!(
-                                "ED Compass {} is available.",
+                                "ED-Compass {} is available.",
                                 release.version
                             ))
                             .strong(),
@@ -79,7 +79,7 @@ pub fn draw(ui: &mut egui::Ui, updater: &mut Updater) {
                             .button(egui::RichText::new(label).strong())
                             .on_hover_text(
                                 "Downloads the new version, checks it against its published \
-                                 checksum, installs it and opens ED Compass again.",
+                                 checksum, installs it and opens ED-Compass again.",
                             )
                             .clicked()
                         {

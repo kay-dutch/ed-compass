@@ -1,4 +1,4 @@
-//! ED Compass — spectrogram anomaly detector and audio direction finder.
+//! ED-Compass — spectrogram anomaly detector and audio direction finder.
 //!
 //! The library half of the application, so the analysis chain can be exercised
 //! by tests and by the synthetic test modes on any platform. Only `audio::capture`

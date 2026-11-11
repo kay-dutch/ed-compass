@@ -78,6 +78,9 @@ fn user_data_dir() -> Option<PathBuf> {
     #[cfg(not(windows))]
     let base = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"));
 
+    // The folder keeps the product's original spelling. It is where existing
+    // installations already keep their settings and captures, and renaming it
+    // would leave them behind. The product name shown everywhere is ED-Compass.
     let dir = base?.join("ED Compass");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)

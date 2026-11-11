@@ -152,29 +152,30 @@ pub fn select<'a>(devices: &'a [AudioDevice], id: &str) -> Option<&'a AudioDevic
         })
 }
 
-/// What capture should open for a configured id, including a chosen program
-/// that is running but not currently playing to any output.
+/// What capture should open for a configured id.
 ///
-/// [`select`] only sees the list it is given, and that list shows programs by
-/// their audio sessions — which is right for the picker, where offering silent
-/// processes would be noise, and wrong for reconnecting, where the program may
-/// be running with nowhere to play yet. So a program is looked up by process
-/// here when the list does not have it.
+/// A **program resolves only while its process is running**, found by process
+/// rather than by the list. The list is the wrong evidence in both directions:
+/// it shows programs by their audio sessions, so a game running with no output
+/// to play to is missing from it — and it always offers Elite, so a game that is
+/// not running at all is present in it. Trusting the list made the reconnect
+/// attach, fail and retry every two seconds for as long as the game was closed,
+/// two error lines and a status flicker each time. Asking for the process makes
+/// the wait quiet until there is something to attach to.
 pub fn resolve(devices: &[AudioDevice], id: &str) -> Option<AudioDevice> {
-    if let Some(found) = select(devices, id) {
-        return Some(found.clone());
+    if let Some(exe) = program_of(id) {
+        if !program_capture_supported() {
+            return None;
+        }
+        let (_, name) = find_program(exe)?;
+        return Some(AudioDevice {
+            id: id.to_string(),
+            name,
+            kind: DeviceKind::ProcessLoopback,
+            is_default: false,
+        });
     }
-    let exe = program_of(id)?;
-    if !program_capture_supported() {
-        return None;
-    }
-    let (_, name) = find_program(exe)?;
-    Some(AudioDevice {
-        id: id.to_string(),
-        name,
-        kind: DeviceKind::ProcessLoopback,
-        is_default: false,
-    })
+    select(devices, id).cloned()
 }
 
 #[cfg(windows)]
@@ -458,7 +459,7 @@ mod imp {
     /// Found from the process list, not from audio sessions. A session exists
     /// only while the program has an output to play to — with the Bluetooth
     /// headset not yet connected, Elite has none — and waiting for one would
-    /// leave ED Compass idle exactly when the game is already running. A capture
+    /// leave ED-Compass idle exactly when the game is already running. A capture
     /// attached by process records silence until sound flows, then follows the
     /// program's audio to whichever output it ends up on.
     pub fn find_program(exe: &str) -> Option<(u32, String)> {
@@ -725,6 +726,26 @@ mod tests {
             select(&d, "unplugged").unwrap().kind,
             DeviceKind::RenderLoopback
         );
+    }
+
+    #[test]
+    fn a_listed_program_that_is_not_running_does_not_resolve() {
+        // Elite is always in the list, running or not. Resolving it from the
+        // list made the reconnect attach to a process that did not exist, fail,
+        // and try again every two seconds while the game was closed.
+        let mut d = devices();
+        d.push(elite());
+        assert!(
+            select(&d, &program_id(ELITE_EXE)).is_some(),
+            "it is in the list"
+        );
+        if find_program(ELITE_EXE).is_none() {
+            assert_eq!(
+                resolve(&d, &program_id(ELITE_EXE)),
+                None,
+                "but with no process there is nothing to attach to"
+            );
+        }
     }
 
     #[test]

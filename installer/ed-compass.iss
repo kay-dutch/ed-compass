@@ -1,4 +1,4 @@
-; Inno Setup script for ED Compass.
+; Inno Setup script for ED-Compass.
 ;
 ; Build:  iscc /DAppVersion=0.1.0 installer\ed-compass.iss
 ; Expects target\release\ed-compass.exe to already exist.
@@ -7,7 +7,7 @@
   #define AppVersion "0.0.0-dev"
 #endif
 
-#define AppName    "ED Compass"
+#define AppName    "ED-Compass"
 #define AppExeName "ed-compass.exe"
 #define AppPublisher "A Zimin"
 
@@ -32,6 +32,12 @@ PrivilegesRequiredOverridesAllowed=dialog
 
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
+; An upgrade installs where the previous version is, whatever the default now
+; says. These are Inno's defaults, stated because they matter: the name changed
+; from "ED Compass", and the in-app updater relaunches the exe at its old path —
+; a second copy in a new folder would leave it starting the old one.
+UsePreviousAppDir=yes
+UsePreviousGroup=yes
 DisableProgramGroupPage=yes
 ; No license page. MIT places no conditions on someone installing the program —
 ; only on redistributing the code — so an "I accept" step guarded nothing. The
@@ -44,6 +50,10 @@ UninstallDisplayName={#AppName}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+; One image per display scale (100% to 250%); Setup picks the closest, so none is
+; stretched. PNG needs Inno Setup 6.5.2 or later.
+WizardImageFile=wizard-100.png,wizard-125.png,wizard-150.png,wizard-175.png,wizard-200.png,wizard-225.png,wizard-250.png
+WizardSmallImageFile=wizard-small-100.png,wizard-small-125.png,wizard-small-150.png,wizard-small-175.png,wizard-small-200.png,wizard-small-225.png,wizard-small-250.png
 
 ; 64-bit only: the audio capture is WASAPI on x64 Windows.
 ArchitecturesAllowed=x64compatible
@@ -71,6 +81,13 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 Filename: "{app}\{#AppExeName}"; \
   Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; \
   Flags: nowait postinstall skipifsilent
+
+[InstallDelete]
+; Shortcuts from before the rename, replaced by the new ones above rather than
+; left beside them. The Desktop one only when the installer was asked to make a
+; Desktop shortcut — one someone made themselves is theirs.
+Type: files; Name: "{group}\ED Compass.lnk"
+Type: files; Name: "{autodesktop}\ED Compass.lnk"; Tasks: desktopicon
 
 [UninstallDelete]
 ; Settings are the user's, and are left alone. These are ours: written by the

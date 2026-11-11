@@ -328,8 +328,9 @@ mod imp {
         tx: &Sender<CaptureMessage>,
         stop: &AtomicBool,
     ) -> Result<()> {
-        let (pid, _) =
-            device::find_program(exe).ok_or_else(|| anyhow::anyhow!("{name} is not running"))?;
+        let (pid, _) = device::find_program(exe).ok_or_else(|| {
+            anyhow::anyhow!("{name} is not running — it is picked up as soon as it starts")
+        })?;
         let process = Watched::open(pid)?;
         // The rate the output mixes at, so the engine's conversion is a format
         // change and not a resample. With no output at all — the headset not yet

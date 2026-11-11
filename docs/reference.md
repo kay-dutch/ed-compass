@@ -1,4 +1,4 @@
-# ED Compass — technical reference
+# ED-Compass — technical reference
 
 Everything about how the tool works, how it was validated, and every setting it
 has. For "what is this and how do I install it", see the
@@ -227,7 +227,7 @@ Untick **In-game overlay** in the main window to stop it appearing at all.
 ed-compass.exe --install-shortcut
 ```
 
-Creates **ED Compass** on your Desktop. (`--overlay` is still accepted and
+Creates **ED-Compass** on your Desktop. (`--overlay` is still accepted and
 ignored, so a shortcut left over from an earlier version still launches.)
 
 ### The in-game overlay
@@ -416,7 +416,7 @@ threshold as much as the game, which is why the numbers differ.
 ## Reading the display
 
 ```
-ED Compass                                    ● CAPTURING
+ED-Compass                                    ● CAPTURING
 Device:  Speakers (Realtek) [LOOPBACK]    48000 Hz · 8 ch (7.1) · F32
 System:  Stuemeae JM-W c1-5825  [0.0, 0.0, 25899.0]
 ```

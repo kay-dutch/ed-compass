@@ -30,7 +30,7 @@ impl std::fmt::Display for ClaimError {
         match self {
             ClaimError::AlreadyRunning => write!(
                 f,
-                "another ED Compass instance is already running. Two instances \
+                "another ED-Compass instance is already running. Two instances \
                  capture the same audio twice and delete each other's recordings, \
                  so this one will exit."
             ),
@@ -51,7 +51,7 @@ pub fn claim() -> Result<InstanceLock, ClaimError> {
 ///
 /// The name is a parameter so the tests can use one of their own. Sharing
 /// [`LOCK_NAME`] with the real application meant the whole suite failed
-/// whenever ED Compass happened to be running — the first claim in each test
+/// whenever ED-Compass happened to be running — the first claim in each test
 /// lost to the live process — which on this project is most of the time.
 #[cfg(windows)]
 pub fn claim_named(name: &str) -> Result<InstanceLock, ClaimError> {
@@ -103,7 +103,7 @@ mod tests {
     /// A lock name unique to this test process.
     ///
     /// Never [`LOCK_NAME`]: that one belongs to the running application, and
-    /// borrowing it made the suite fail whenever ED Compass was open.
+    /// borrowing it made the suite fail whenever ED-Compass was open.
     fn test_lock(tag: &str) -> String {
         format!("Local\\ed-compass-test-{}-{tag}", std::process::id())
     }

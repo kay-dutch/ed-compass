@@ -187,7 +187,7 @@ pub struct GameWindow {
 
 /// The overlay window's title, used to find it again for the Win32 calls that
 /// egui does not expose.
-pub const OVERLAY_WINDOW_TITLE: &str = "ED Compass overlay";
+pub const OVERLAY_WINDOW_TITLE: &str = "ED-Compass overlay";
 
 /// Window titles Elite Dangerous is known to use, in order of preference.
 pub const GAME_WINDOW_TITLES: [&str; 2] = ["Elite - Dangerous (CLIENT)", "Elite - Dangerous"];

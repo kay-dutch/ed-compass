@@ -228,7 +228,7 @@ pub fn detect_install() -> Install {
     }
 }
 
-/// The folder the installer recorded, if ED Compass has ever been installed.
+/// The folder the installer recorded, if ED-Compass has ever been installed.
 pub fn recorded_install_dir() -> Option<PathBuf> {
     platform::installed_dir()
 }
@@ -347,10 +347,10 @@ impl Updater {
                 s.checking = false;
                 match found {
                     Ok(Some(release)) => {
-                        log::info!("ED Compass {} is available", release.version);
+                        log::info!("ED-Compass {} is available", release.version);
                         s.offer = Some(release);
                     }
-                    Ok(None) => log::info!("ED Compass is up to date"),
+                    Ok(None) => log::info!("ED-Compass is up to date"),
                     // Offline is ordinary, and not worth a banner.
                     Err(e) => log::info!("could not check for updates: {e:#}"),
                 }

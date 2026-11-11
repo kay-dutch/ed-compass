@@ -11,10 +11,10 @@ fn main() {
     {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/ed-compass.ico");
-        res.set("ProductName", "ED Compass");
+        res.set("ProductName", "ED-Compass");
         res.set(
             "FileDescription",
-            "ED Compass — Elite Dangerous signal monitor",
+            "ED-Compass — Elite Dangerous signal monitor",
         );
         res.set(
             "LegalCopyright",

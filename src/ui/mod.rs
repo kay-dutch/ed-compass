@@ -82,7 +82,7 @@ fn native_options(backend: Backend) -> eframe::NativeOptions {
         // The version in the title, where the taskbar and Alt-Tab show it. Only
         // the title: the name passed to `run_native` is eframe's app id, which
         // names its settings storage, and changing it would lose them.
-        .with_title(format!("ED Compass {}", env!("CARGO_PKG_VERSION")))
+        .with_title(format!("ED-Compass {}", env!("CARGO_PKG_VERSION")))
         .with_inner_size([1180.0, 860.0])
         .with_min_inner_size([900.0, 620.0])
         // Transparency is requested here, on the *root* window, even though
@@ -290,7 +290,7 @@ fn build_identity() -> (String, String) {
         _ => format!("v{version}"),
     };
     let detail = format!(
-        "ED Compass {version}\nbuilt {}\n{}\n{}",
+        "ED-Compass {version}\nbuilt {}\n{}\n{}",
         built.as_deref().unwrap_or("at an unknown time"),
         exe.as_ref()
             .map(|p| p.display().to_string())
@@ -434,7 +434,7 @@ impl CompassUi {
 
     fn header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("ED Compass");
+            ui.heading("ED-Compass");
             ui.label(
                 egui::RichText::new(&self.version_line)
                     .monospace()

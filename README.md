@@ -1,4 +1,6 @@
-# ED Compass
+<h1 align="center">
+  <img src="docs/images/ed-compass-banner.png" alt="ED-Compass — Elite Dangerous audio steganography detector" width="100%">
+</h1>
 
 **Elite Dangerous hides signals in its audio. This listens for them while you fly.**
 
@@ -21,14 +23,14 @@ is a picture drawn in sound — mountains, a horizon, a repeating pattern — au
 from anywhere in the galaxy, discovered by commanders who happened to look at a
 spectrogram. Nobody knows how many others there are.
 
-ED Compass watches for them so you don't have to. Three lamps in your cockpit,
+ED-Compass watches for them so you don't have to. Three lamps in your cockpit,
 lit when something is out there.
 
-<img src="docs/images/ed-compass.png" alt="The ED Compass analysis window: a live spectrogram of Elite's audio, with the direction compass, periodicity meter and detection log below it" width="820">
+<img src="docs/images/ed-compass.png" alt="The ED-Compass analysis window: a live spectrogram of Elite's audio, with the direction compass, periodicity meter and detection log below it" width="820">
 
 <sub>The full view — everything heard in the last few minutes.</sub>
 
-<img src="docs/images/ed-compass-overlay.png" alt="The ED Compass in-game overlay view: the same live spectrogram and lamp indicators" width="820">
+<img src="docs/images/ed-compass-overlay.png" alt="The ED-Compass in-game overlay view: the same live spectrogram and lamp indicators" width="820">
 
 <sub>The overlay — the same spectrogram and lamps, over the cockpit. This is what you fly with.</sub>
 <!-- More screenshots -->
@@ -53,7 +55,7 @@ Two settings in Elite are worth changing:
 > **Graphics → Display Mode: Borderless.** Not exclusive fullscreen — no overlay
 > of any kind can draw over it.
 >
-> **Audio → Music: 0.** ED Compass listens to everything your speakers play, and
+> **Audio → Music: 0.** ED-Compass listens to everything your speakers play, and
 > the soundtrack is loud, broadband and full of exactly the sustained tones and
 > drifting notes a real signal looks like. Turning it off is the single biggest
 > thing you can do for detection quality. Ship and effects audio can stay on.
@@ -66,7 +68,7 @@ Discord looks much like a transmission to a detector, and a paused video that
 resumes itself will sit in the middle of your capture.
 
 **On Windows 11 there's a cleaner answer:** choose **Elite Dangerous** under
-**Programs** in the device list, and ED Compass hears the game and nothing else.
+**Programs** in the device list, and ED-Compass hears the game and nothing else.
 
 ## What you'll see
 
@@ -115,7 +117,7 @@ only notices things you could have noticed yourself with headphones and patience
 
 Partly, and it is worth knowing which parts.
 
-Given the community's published recording of the Landscape Signal, ED Compass
+Given the community's published recording of the Landscape Signal, ED-Compass
 recovers its period from the audio alone — no template, nothing to match
 against — and agrees with the figure Canonn documented. Keyed transmissions are
 detected the same way.
@@ -164,7 +166,7 @@ itself — when a new version is out, it points you to the download instead.
 
 **Does it update itself?** When you installed it with the installer, yes — but
 only when you say so. A banner at the top of the window offers a new version;
-one click downloads it, checks it, installs it and reopens ED Compass. To stop
+one click downloads it, checks it, installs it and reopens ED-Compass. To stop
 it checking at all, set `check_for_updates = false` in `config.toml`.
 
 **Something went wrong — what should I send?** `ed-compass.log`, which sits next

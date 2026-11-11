@@ -1,4 +1,4 @@
-//! ED Compass — spectrogram anomaly detector and audio direction finder for
+//! ED-Compass — spectrogram anomaly detector and audio direction finder for
 //! Elite Dangerous.
 
 // Ship as a GUI application, so launching it from a shortcut does not open a
@@ -204,7 +204,7 @@ fn install_shortcuts() -> Result<()> {
 
     // One shortcut, because there is one window. The overlay comes and goes
     // with the game rather than being something you launch.
-    let shortcuts = [("ED Compass", "")];
+    let shortcuts = [("ED-Compass", "")];
 
     for (name, args) in shortcuts {
         let script = format!(
@@ -229,7 +229,7 @@ fn install_shortcuts() -> Result<()> {
     println!("  Graphics -> Display Mode: BORDERLESS. An exclusive-fullscreen game");
     println!("  covers every other window, including the overlay.");
     println!();
-    println!("  Audio -> Music: 0. ED Compass hears whatever your speakers play, and");
+    println!("  Audio -> Music: 0. ED-Compass hears whatever your speakers play, and");
     println!("  the soundtrack looks like a signal to every detector here. Ship and");
     println!("  effects audio can stay on.");
     Ok(())
@@ -272,7 +272,7 @@ fn init_logging(verbosity: u8, to_stderr: bool, to_file: bool) {
 
 /// Where log lines go, beyond the console.
 ///
-/// ED Compass keeps its own log because a windowed program has nowhere to show
+/// ED-Compass keeps its own log because a windowed program has nowhere to show
 /// one. Asking for a terminal to capture it failed twice over: PowerShell does
 /// not pass `2>` through to a windowed program, so the file stayed empty — and
 /// worse, it handed over a pipe it never read, so with `-v` the first few
@@ -497,7 +497,7 @@ fn build_app(cli: &Cli, cfg: Config, capture_dir: PathBuf) -> Result<App> {
 /// Why there is nothing to listen to, at length, for the console.
 const NO_OUTPUT_DEVICE: &str = "no audio output endpoint is available, so there is nothing to listen to.\n\
      \n\
-     ED Compass captures what your speakers or headphones are playing. With no\n\
+     ED-Compass captures what your speakers or headphones are playing. With no\n\
      output device present — headphones unplugged, or none configured — there is\n\
      no game audio to hear. It will not fall back to a microphone: that would\n\
      record the room rather than the game.\n\
@@ -931,7 +931,7 @@ fn install_crash_log() {
         let path = Config::default_path().with_file_name(format!("crash-{stamp}.log"));
         let backtrace = std::backtrace::Backtrace::force_capture();
         let report = format!(
-            "ED Compass {} crashed at {stamp}\nrenderer: {}\nthread: {}\n\n{info}\n\n{backtrace}\n",
+            "ED-Compass {} crashed at {stamp}\nrenderer: {}\nthread: {}\n\n{info}\n\n{backtrace}\n",
             env!("CARGO_PKG_VERSION"),
             ed_compass::ui::active_backend(),
             std::thread::current().name().unwrap_or("unnamed"),
@@ -1027,7 +1027,7 @@ fn main() -> Result<()> {
         let _ = std::fs::write(
             &path,
             format!(
-                "ED Compass {} exited with an error at {stamp}\n\n{e:#}\n",
+                "ED-Compass {} exited with an error at {stamp}\n\n{e:#}\n",
                 env!("CARGO_PKG_VERSION")
             ),
         );
