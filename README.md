@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="docs/images/ed-compass-banner.png" alt="ED-Compass — Elite Dangerous audio steganography detector" width="100%">
+  <img src="docs/images/ed-compass-banner.png" alt="ED-Compass — Elite Dangerous audio steganography detector" width="820">
 </h1>
 
 **Elite Dangerous hides signals in its audio. This listens for them while you fly.**
