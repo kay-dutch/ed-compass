@@ -406,8 +406,8 @@ impl SyntheticSource {
         out.reserve(frames * channels);
         for _ in 0..frames {
             let mono = self.next_mono();
-            for c in 0..channels {
-                out.push(mono * self.gains[c]);
+            for gain in &self.gains[..channels] {
+                out.push(mono * gain);
             }
             self.sample += 1;
         }
