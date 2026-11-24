@@ -528,6 +528,7 @@ last of them enforced by the retention policy described below.
 | key | default | what it does |
 |---|---|---|
 | `device` | `""` | endpoint id, or `program:<executable>` for one program; empty means the default output, in loopback |
+| `device_name` | `""` | the chosen device's name, shown while it is not connected |
 | `check_for_updates` | `true` | ask GitHub at startup whether a newer release exists, and offer it; never installs on its own |
 | `capture_format` | `"flac"` | container for captures; `"wav"` for uncompressed |
 | `disk_budget_mb` | `2048` | ceiling on captured audio; sidecars are exempt |

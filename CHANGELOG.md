@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.6.4 — beta
+
+* Settings are remembered between launches.
+* Bugfixes.
+
 ## v0.6.3 — beta
 
 * Renamed to ED-Compass.

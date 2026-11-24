@@ -1,8 +1,9 @@
 //! Configuration: a `config.toml` living next to the executable.
 //!
 //! Defaults are written out on first run so the file is self-documenting by
-//! example. CLI flags override the file; only the selected device is persisted
-//! back from the UI.
+//! example. CLI flags override the file; choices made in the window — the
+//! device, the checkboxes, muted bands — are written back one at a time (see
+//! [`Config::remember`]).
 
 use std::path::{Path, PathBuf};
 
@@ -91,6 +92,9 @@ fn user_data_dir() -> Option<PathBuf> {
 pub struct Config {
     /// Endpoint id, or empty for the default render endpoint in loopback mode.
     pub device: String,
+    /// What `device` was called when it was chosen. Only for saying what is
+    /// being waited for while it is absent — an id cannot be looked up then.
+    pub device_name: String,
 
     // ---- buffers ----
     /// Raw multichannel PCM retained in memory. 150 s covers one 109.5 s
@@ -411,6 +415,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             device: String::new(),
+            device_name: String::new(),
 
             pcm_ring_seconds: 150.0,
             fft_size: 4096,
@@ -609,10 +614,41 @@ impl Config {
         self.overlay_layout_revision = OVERLAY_LAYOUT_REVISION;
     }
 
+    /// Record one choice made in the window, changing nothing else in the file.
+    ///
+    /// Reads the file fresh rather than writing out the running copy: the
+    /// running copy carries command-line overrides that were never meant to
+    /// outlive this launch, and the file may have been edited by hand since it
+    /// was loaded. Either would be overwritten by saving the whole of `self`.
+    pub fn remember(path: &Path, choice: impl FnOnce(&mut Config)) -> Result<()> {
+        let mut cfg = match std::fs::read_to_string(path) {
+            Ok(text) => toml::from_str(&text)
+                .with_context(|| format!("parsing config at {}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(e) => {
+                return Err(e).with_context(|| format!("reading config from {}", path.display()));
+            }
+        };
+        choice(&mut cfg);
+        cfg.save(path)
+    }
+
+    /// Write the whole file, atomically.
+    ///
+    /// Written beside the target and renamed over it, so a crash or power cut
+    /// mid-write leaves either the old file or the new one — never half of
+    /// one, which would stop the next launch at the parse.
     pub fn save(&self, path: &Path) -> Result<()> {
         let text = toml::to_string_pretty(self).context("serializing config")?;
-        std::fs::write(path, text)
-            .with_context(|| format!("writing config to {}", path.display()))?;
+        let mut staging = path.as_os_str().to_owned();
+        staging.push(".tmp");
+        let staging = PathBuf::from(staging);
+        std::fs::write(&staging, text)
+            .with_context(|| format!("writing config to {}", staging.display()))?;
+        std::fs::rename(&staging, path).map_err(|e| {
+            let _ = std::fs::remove_file(&staging);
+            anyhow::Error::new(e).context(format!("replacing {}", path.display()))
+        })?;
         Ok(())
     }
 
@@ -942,6 +978,7 @@ mod tests {
         "overlay_zoom_hold_seconds",
         "overlay_zoom_lockout_seconds",
         "device",
+        "device_name",
         "pcm_ring_seconds",
         "fft_size",
         "hop",
@@ -1206,5 +1243,76 @@ mod tests {
         });
         assert!(cfg.is_ignored(60.0));
         assert!(!cfg.is_ignored(1000.0));
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ed-compass-cfg-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// The running copy holds command-line overrides, and the file may have
+    /// been edited by hand since launch. Saving one choice must keep both apart.
+    #[test]
+    fn remembering_a_choice_leaves_the_rest_of_the_file_alone() {
+        let dir = scratch("remember");
+        let path = dir.join("config.toml");
+        let mut on_disk = Config::default();
+        on_disk.device = "{headset}".into();
+        on_disk.save(&path).expect("save");
+
+        // Launched with `--device`: the override lives in memory only.
+        let mut running = Config::load_or_create(&path).expect("load");
+        running.device = "{from the command line}".into();
+        // Edited by hand while the app runs.
+        on_disk.fft_size = 2048;
+        on_disk.save(&path).expect("save");
+
+        let flipped = !running.direction_finding;
+        Config::remember(&path, |c| c.direction_finding = flipped).expect("remember");
+
+        let after = Config::load_or_create(&path).expect("reload");
+        assert_eq!(after.direction_finding, flipped);
+        assert_eq!(
+            after.device, "{headset}",
+            "a command-line override leaked into the file"
+        );
+        assert_eq!(after.fft_size, 2048, "a hand edit was overwritten");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remembering_without_a_file_starts_from_the_defaults() {
+        let dir = scratch("remember-new");
+        let path = dir.join("config.toml");
+        Config::remember(&path, |c| c.detect_morse = !c.detect_morse).expect("remember");
+        let after = Config::load_or_create(&path).expect("reload");
+        assert_eq!(after.detect_morse, !Config::default().detect_morse);
+        assert_eq!(after.fft_size, Config::default().fft_size);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A broken file stops the next launch at the parse, so a save must never
+    /// leave one — or its staging copy — behind.
+    #[test]
+    fn saving_replaces_the_file_whole_and_leaves_nothing_beside_it() {
+        let dir = scratch("atomic");
+        let path = dir.join("config.toml");
+        Config::default().save(&path).expect("first save");
+        let mut changed = Config::default();
+        changed.device = "{headset}".into();
+        changed.save(&path).expect("second save");
+
+        assert_eq!(
+            Config::load_or_create(&path).expect("reload").device,
+            "{headset}"
+        );
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .expect("list")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("config.toml")]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

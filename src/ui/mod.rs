@@ -462,12 +462,17 @@ impl CompassUi {
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let red = egui::Color32::from_rgb(255, 110, 110);
                 if let Some(e) = self.app.error() {
-                    ui.label(
-                        egui::RichText::new(e)
-                            .monospace()
-                            .color(egui::Color32::from_rgb(255, 110, 110)),
-                    );
+                    ui.label(egui::RichText::new(e).monospace().color(red));
+                }
+                if let Some(problem) = self.app.settings_problem() {
+                    ui.label(egui::RichText::new(problem).monospace().color(red))
+                        .on_hover_text(
+                            "Your choices still apply now, but the next launch \
+                             will not remember them. Usually the settings file \
+                             is read-only or open in another program.",
+                        );
                 }
             });
         });
@@ -491,6 +496,18 @@ impl CompassUi {
                 .clicked()
             {
                 self.devices = device::enumerate().unwrap_or_default();
+            }
+            if let Some(note) = self.app.stand_in_note() {
+                ui.label(
+                    egui::RichText::new(note)
+                        .monospace()
+                        .size(10.0)
+                        .color(overlay::hud::AMBER),
+                )
+                .on_hover_text(
+                    "Your choice is kept. ED-Compass moves to it by itself as \
+                     soon as it connects.",
+                );
             }
             let mut excess = self.app.config().spectrogram_show_excess;
             if ui

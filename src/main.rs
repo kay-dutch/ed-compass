@@ -490,7 +490,7 @@ fn build_app(cli: &Cli, cfg: Config, capture_dir: PathBuf) -> Result<App> {
 
     let handle = capture::start(&selected, tx.clone())?;
     let mut app = App::new(cfg, selected.display_name(), handle, tx, rx, capture_dir);
-    app.reconnect_on_device_loss();
+    app.reconnect_on_device_loss(&selected);
     Ok(app)
 }
 
@@ -999,7 +999,8 @@ fn main() -> Result<()> {
     // running copy's log away.
     start_log_file(&config_path);
 
-    let app = build_app(&cli, cfg, capture_dir)?;
+    let mut app = build_app(&cli, cfg, capture_dir)?;
+    app.set_config_path(config_path.clone());
 
     let result = if cli.headless {
         run_headless(
